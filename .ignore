@@ -1,0 +1,8 @@
+!.slim/deepwork/
+!.slim/deepwork/**
+!.slim/debug/
+!.slim/debug/**
+
+# Generated build artifacts
+.build/
+.DS_Store

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="base" x1="150" y1="110" x2="850" y2="920" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#161616"/>
+      <stop offset="0.52" stop-color="#080808"/>
+      <stop offset="1" stop-color="#020202"/>
+    </linearGradient>
+    <linearGradient id="cyan" x1="225" y1="700" x2="785" y2="285" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#16CBDD"/>
+      <stop offset="1" stop-color="#67F5FF"/>
+    </linearGradient>
+    <filter id="cyanGlow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="22"/>
+    </filter>
+    <clipPath id="iconClip">
+      <rect x="62" y="56" width="900" height="900" rx="212"/>
+    </clipPath>
+  </defs>
+
+  <rect x="48" y="48" width="928" height="928" rx="224" fill="#000000" opacity="0.34"/>
+  <rect x="62" y="56" width="900" height="900" rx="212" fill="url(#base)" stroke="#2A2A2A" stroke-width="8"/>
+
+  <g clip-path="url(#iconClip)">
+    <g fill="none" stroke-linecap="round">
+      <path d="M286 298 H722" stroke="#FFFFFF" stroke-opacity="0.15" stroke-width="44"/>
+      <path d="M598 728 H748" stroke="#FFFFFF" stroke-opacity="0.13" stroke-width="44"/>
+    </g>
+    <circle cx="228" cy="298" r="22" fill="#3CEBF4" opacity="0.82"/>
+    <circle cx="540" cy="728" r="22" fill="#FFFFFF" opacity="0.16"/>
+
+    <path d="M232 526 L408 692 L790 318" fill="none" stroke="#16D9E8" stroke-opacity="0.22" stroke-width="138" stroke-linecap="round" stroke-linejoin="round" filter="url(#cyanGlow)"/>
+    <path d="M232 526 L408 692 L790 318" fill="none" stroke="url(#cyan)" stroke-width="92" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+</svg>

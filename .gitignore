@@ -1,0 +1,6 @@
+.slim/deepwork/
+.slim/debug/
+
+# SwiftPM build directory and generated app bundle
+.build/
+.DS_Store
