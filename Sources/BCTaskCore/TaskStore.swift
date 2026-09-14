@@ -19,10 +19,16 @@ public enum TaskStoreError: Error, Equatable, Sendable {
 /// - Entering `.done` records `completedAt = now` and clears `archivedAt`.
 /// - Leaving `.done` (reopen) clears `completedAt` and `archivedAt`, so a
 ///   reopened task can never carry a stale archival deadline.
-/// - Moving does not change `isPinned`; only archival unpins.
+/// - Every real status move re-syncs `isPinned` to the new status: entering
+///   `.doing` pins, entering `.todo`/`.done` unpins. Same-status moves are
+///   no-ops that never touch the pin, so a manually set pin survives until
+///   the next real status change; the archival sweep and archive restore
+///   still unpin.
 /// - Archived tasks are immutable: any status/pin mutation throws
 ///   `.archivedTasksAreImmutable`. Restoring an archived task is a separate,
 ///   explicit operation: `restoreArchivedTask(id:now:)`.
+/// - Deletion removes any task (live or archived) permanently: there is no
+///   archive step, no undo, and no timestamp is recorded.
 ///
 /// Archival policy: a `.done` task becomes archived at exactly one hour after
 /// its persisted `completedAt` (inclusive boundary). `sweep(now:)` is called
@@ -60,6 +66,10 @@ public struct TaskStore: Equatable, Sendable {
     }
 
     /// Moves a task to `newStatus`, enforcing the transition invariants above.
+    /// Every real status move re-syncs the pin to the new status (Doing pins;
+    /// Todo/Done unpin). Same-status moves are guarded no-ops that never touch
+    /// a manually set pin; `setPinned` remains a temporary override that
+    /// survives until the next status change.
     public mutating func setStatus(id: UUID, to newStatus: TaskStatus, now: Date) throws {
         guard let index = tasks.firstIndex(where: { $0.id == id }) else {
             throw TaskStoreError.taskNotFound(id: id)
@@ -100,6 +110,17 @@ public struct TaskStore: Equatable, Sendable {
         tasks[index].isPinned = false
         tasks[index].updatedAt = now
         return tasks[index]
+    }
+
+    /// Permanently removes a task (live or archived) from the store.
+    /// Unlike completion, deletion is immediate and final: there is no
+    /// archive step, no undo, and no timestamp is recorded.
+    @discardableResult
+    public mutating func deleteTask(id: UUID) throws -> TaskItem {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else {
+            throw TaskStoreError.taskNotFound(id: id)
+        }
+        return tasks.remove(at: index)
     }
 
     /// Archives every `.done` task whose persisted `completedAt` is at least
@@ -173,5 +194,8 @@ public struct TaskStore: Equatable, Sendable {
             tasks[index].completedAt = nil
             tasks[index].archivedAt = nil
         }
+        // The pin mirrors "currently in Doing": every real status move re-syncs
+        // it. Same-status moves are guarded no-ops above and never touch it.
+        tasks[index].isPinned = (newStatus == .doing)
     }
 }

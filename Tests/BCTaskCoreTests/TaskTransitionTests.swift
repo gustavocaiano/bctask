@@ -109,19 +109,22 @@ struct TaskTransitionTests {
         #expect(TaskStore.archivalDeadline(of: done) == t2.addingTimeInterval(3600))
     }
 
-    @Test func reopenKeepsPinStateButSweepUnpinsOnlyOnArchival() throws {
+    @Test func pinMirrorsDoingAcrossStatusMovesAndSweepUnpinsOnlyOnArchival() throws {
         var store = TaskStore()
         let task = try store.addTask(title: "task", now: t0)
         try store.setPinned(true, for: task.id, now: t0)
 
+        // Manual pin is a temporary override: it survives until the next real
+        // status move, which re-syncs the pin to the new status.
+        try store.setStatus(id: task.id, to: .doing, now: t1)
         try store.setStatus(id: task.id, to: .done, now: t1)
         try store.setStatus(id: task.id, to: .todo, now: t1)
-        #expect(try #require(store.tasks.first).isPinned)
+        #expect(try #require(store.tasks.first).isPinned == false, "Todo/Done moves unpin")
 
         store.sweep(now: t1.addingTimeInterval(7200))
         let after = try #require(store.tasks.first)
         #expect(after.isArchived == false, "a reopened task carries no leftover deadline so it is never archived")
-        #expect(after.isPinned == true)
+        #expect(after.isPinned == false, "sweep never touches a live task's pin either way")
     }
 
     @Test func archivedTaskRejectsEveryMutation() throws {

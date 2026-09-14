@@ -87,6 +87,11 @@ final class AppModel: ObservableObject {
         mutate { store, at in try store.setPinned(pinned, for: task.id, now: at) }
     }
 
+    /// Permanently deletes a task (live or archived). Immediate; no archive step.
+    func delete(_ task: TaskItem) {
+        mutate { store, _ in try store.deleteTask(id: task.id) }
+    }
+
     /// Restores an archived task to Todo. Archived tasks reject normal
     /// transitions; restoration is the only mutating path for them.
     func restore(_ task: TaskItem) {

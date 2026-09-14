@@ -72,6 +72,8 @@ struct ContentView: View {
                 case .archive:
                     ArchiveTaskView(tasks: model.archivedTasks) { task in
                         model.restore(task)
+                    } onDelete: { task in
+                        model.delete(task)
                     }
                 }
             }
@@ -227,6 +229,29 @@ struct ContentView: View {
         case .moveFocusedTaskForward:
             guard section == .tasks else { return }
             moveFocusedTask(by: 1)
+        case .pinFocusedTask:
+            guard section == .tasks else { return }
+            guard let focusedTaskID,
+                  let task = model.activeTasks.first(where: { $0.id == focusedTaskID })
+            else { return }
+            model.setPinned(task, !task.isPinned)
+            // Do not touch entry focus: pinning must not steal typing focus.
+        case .deleteFocusedTask:
+            guard section == .tasks else { return }
+            guard let focusedTaskID,
+                  let task = model.activeTasks.first(where: { $0.id == focusedTaskID })
+            else { return }
+            // Neighbor-focus: after deleting, focus the next task in the current
+            // projection order, else the previous one (macOS list convention).
+            let ordered = focusOrderedTasks
+            var neighbor: UUID?
+            if let index = ordered.firstIndex(where: { $0.id == task.id }) {
+                if ordered.indices.contains(index + 1) { neighbor = ordered[index + 1].id }
+                else if index > 0 { neighbor = ordered[index - 1].id }
+            }
+            setEntryFocus(false)
+            model.delete(task)
+            self.focusedTaskID = neighbor
         case .leaveNewTaskEntry:
             // Escape leaves typing without discarding the in-progress draft.
             setEntryFocus(false)
@@ -351,8 +376,24 @@ private struct TaskShortcutMenu: View {
                 Label("Move focused task forward", systemImage: "arrow.right")
             }
             .keyboardShortcut(.rightArrow, modifiers: .command)
+
+            Divider()
+
+            Button {
+                commandRouter.send(.pinFocusedTask)
+            } label: {
+                Label("Pin or unpin focused task", systemImage: "pin")
+            }
+            .keyboardShortcut("p", modifiers: .command)
+
+            Button {
+                commandRouter.send(.deleteFocusedTask)
+            } label: {
+                Label("Delete focused task", systemImage: "trash")
+            }
+            .keyboardShortcut(.delete, modifiers: .command)
         } label: {
-            Label("Esc Leave / Hide  ·  Tab View  ·  ↑↓ Focus  ·  ⌘←/⌘→ Move", systemImage: "keyboard")
+            Label("Esc Leave / Hide  ·  Tab View  ·  ↑↓ Focus  ·  ⌘←/⌘→ Move  ·  ⌘P Pin  ·  ⌘⌫ Delete", systemImage: "keyboard")
                 .font(.system(size: 10, weight: .medium))
                 .foregroundStyle(BCTaskTheme.textTertiary)
                 .frame(minHeight: 30)

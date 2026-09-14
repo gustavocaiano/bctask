@@ -15,7 +15,7 @@ panel.
 
 ## Build and test
 
-- `scripts/test.sh` — canonical test runner (89 Swift Testing tests). Bare
+- `scripts/test.sh` — canonical test runner (110 Swift Testing tests). Bare
   `swift test` silently discovers zero tests on CLT-only machines because the
   Swift Testing framework lives outside the SDK; the script derives the needed
   framework/plugin paths from the active developer directory, passes them to
@@ -97,7 +97,16 @@ distributably signed artifact.
 - Pin/unpin any task to open a floating always-on-top panel for it. Pinned
   panels stay visible across Spaces and full-screen apps, keep their own
   persisted position per task, and close (unpinning the task) when you close
-  them. Pin state persists across launches.
+  them. Pin state persists across launches. `Command-P` pins or unpins the
+  focused task.
+- Any task (active or archived) can be deleted permanently with the trash
+  button on its row, or with `Command-Delete` for the focused task. Deletion
+  is immediate — there is no archive step and no undo. Deleting a pinned task
+  also closes its floating panel.
+- The pin now mirrors "currently in Doing": moving a task to Doing pins it
+  automatically and its floating panel opens; moving it to Todo or Done unpins
+  it and the panel closes. Manual pin/unpin (button or `Command-P`) still works
+  and lasts until the task's next status change.
 - In Kanban, drag a card onto any part of another Todo, Doing, or Done column
   to change its status. Empty columns and the whitespace below cards are drop
   targets. Dragging never manually reorders cards within a column; the existing
@@ -116,6 +125,10 @@ distributably signed artifact.
 - `Up` / `Down` — move task focus
 - `Command-Left` / `Command-Right` — move the focused task backward/forward
   through Todo → Doing → Done
+- `Command-P` — pin or unpin the focused task
+- `Command-Delete` — delete the focused task (while typing a new task,
+  Command-Delete keeps its standard text behavior and is not a delete
+  shortcut)
 
 ## Project layout
 

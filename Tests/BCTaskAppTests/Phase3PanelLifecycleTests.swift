@@ -30,6 +30,8 @@ struct KeyShortcutTranslatorTests {
     private let right = KeyCommandTranslator.keyCodeRightArrow
     private let tab = KeyCommandTranslator.keyCodeTab
     private let escape = KeyCommandTranslator.keyCodeEscape
+    private let p = KeyCommandTranslator.keyCodeP
+    private let deleteKey = KeyCommandTranslator.keyCodeDelete
 
     @Test func commandNFocusesNewTask() {
         #expect(KeyCommandTranslator.translate(keyCode: n, modifiers: .command) == .focusNewTask)
@@ -89,6 +91,30 @@ struct KeyShortcutTranslatorTests {
             #expect(KeyCommandTranslator.translate(keyCode: tab, modifiers: modifiers) == nil)
             #expect(KeyCommandTranslator.translate(keyCode: escape, modifiers: modifiers) == nil)
         }
+    }
+
+    @Test func commandPAndCommandDeleteTranslateToPinAndDeleteFocusedTask() {
+        #expect(KeyCommandTranslator.translate(keyCode: p, modifiers: .command) == .pinFocusedTask)
+        #expect(KeyCommandTranslator.translate(keyCode: deleteKey, modifiers: .command) == .deleteFocusedTask)
+    }
+
+    @Test func modifiedAndPlainDeleteAndPinVariantsPassThroughUntouched() {
+        #expect(KeyCommandTranslator.translate(keyCode: p, modifiers: []) == nil)
+        #expect(KeyCommandTranslator.translate(keyCode: deleteKey, modifiers: []) == nil)
+        #expect(KeyCommandTranslator.translate(keyCode: p, modifiers: [.command, .shift]) == nil)
+        #expect(KeyCommandTranslator.translate(keyCode: deleteKey, modifiers: [.command, .option]) == nil)
+        #expect(KeyCommandTranslator.translate(keyCode: 117, modifiers: .command) == nil) // forward delete
+        #expect(KeyCommandTranslator.translate(keyCode: deleteKey, modifiers: .shift) == nil)
+    }
+
+    @Test func bridgeGateForPinAndDeleteFocusedTask() {
+        // Cmd-Backspace must reach the focused new-task field as standard
+        // text editing, so deleteFocusedTask is not consumed while typing.
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.deleteFocusedTask, taskEntryIsFocused: true) == nil)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.deleteFocusedTask, taskEntryIsFocused: false) == .deleteFocusedTask)
+        // Cmd-P has no text-field meaning: consumed in both focus states.
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.pinFocusedTask, taskEntryIsFocused: true) == .pinFocusedTask)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.pinFocusedTask, taskEntryIsFocused: false) == .pinFocusedTask)
     }
 
     @Test func unknownKeysAreNeverConsumed() {

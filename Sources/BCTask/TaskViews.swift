@@ -25,7 +25,8 @@ struct TaskListView: View {
                                 isFocused: focusedTaskID == task.id,
                                 onFocus: { onFocusTask(task.id) },
                                 onStatus: { model.setStatus(task, to: $0) },
-                                onPin: { model.setPinned(task, $0) }
+                                onPin: { model.setPinned(task, $0) },
+                                onDelete: { model.delete(task) }
                             )
                             .id(task.id)
                         }
@@ -77,6 +78,9 @@ struct TaskKanbanView: View {
                                 },
                                 onPin: { task, pinned in
                                     model.setPinned(task, pinned)
+                                },
+                                onDelete: { task in
+                                    model.delete(task)
                                 }
                             )
                         }
@@ -96,6 +100,7 @@ struct TaskKanbanView: View {
 struct ArchiveTaskView: View {
     let tasks: [TaskItem]
     let onRestore: (TaskItem) -> Void
+    let onDelete: (TaskItem) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -130,9 +135,15 @@ struct ArchiveTaskView: View {
                 ScrollView {
                     LazyVStack(spacing: 7) {
                         ForEach(tasks) { task in
-                            ArchiveTaskRowView(task: task) {
-                                onRestore(task)
-                            }
+                            ArchiveTaskRowView(
+                                task: task,
+                                onRestore: {
+                                    onRestore(task)
+                                },
+                                onDelete: {
+                                    onDelete(task)
+                                }
+                            )
                         }
                     }
                     .padding(.horizontal, 16)
@@ -150,6 +161,7 @@ struct TaskListRowView: View {
     let onFocus: () -> Void
     let onStatus: (TaskStatus) -> Void
     let onPin: (Bool) -> Void
+    let onDelete: () -> Void
 
     @State private var isHovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -183,6 +195,10 @@ struct TaskListRowView: View {
 
             TaskPinButton(isPinned: task.isPinned) {
                 onPin(!task.isPinned)
+            }
+
+            TaskDeleteButton {
+                onDelete()
             }
         }
         .padding(.leading, 10)
@@ -286,6 +302,7 @@ private struct KanbanColumnView: View {
     let onDragFinished: () -> Void
     let onStatus: (TaskItem, TaskStatus) -> Bool
     let onPin: (TaskItem, Bool) -> Void
+    let onDelete: (TaskItem) -> Void
 
     @State private var isDropTargeted = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -346,7 +363,8 @@ private struct KanbanColumnView: View {
                         onStatus: { target in
                             _ = onStatus(task, target)
                         },
-                        onPin: { onPin(task, $0) }
+                        onPin: { onPin(task, $0) },
+                        onDelete: { onDelete(task) }
                     )
                     .id(task.id)
                 }
@@ -419,6 +437,7 @@ private struct KanbanTaskCardView: View {
     let onDragBegan: () -> Void
     let onStatus: (TaskStatus) -> Void
     let onPin: (Bool) -> Void
+    let onDelete: () -> Void
 
     @State private var isHovering = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -435,6 +454,10 @@ private struct KanbanTaskCardView: View {
 
                 TaskPinButton(isPinned: task.isPinned) {
                     onPin(!task.isPinned)
+                }
+
+                TaskDeleteButton {
+                    onDelete()
                 }
             }
 
@@ -580,6 +603,7 @@ private struct KanbanColumnDropDelegate: DropDelegate {
 private struct ArchiveTaskRowView: View {
     let task: TaskItem
     let onRestore: () -> Void
+    let onDelete: () -> Void
 
     var body: some View {
         HStack(spacing: 12) {
@@ -610,6 +634,13 @@ private struct ArchiveTaskRowView: View {
             .help("Restore to Todo")
             .accessibilityLabel("Restore \(task.title)")
             .accessibilityHint("Moves this task back to Todo.")
+
+            TaskDeleteButton {
+                onDelete()
+            }
+            .help("Delete from archive")
+            .accessibilityLabel("Delete \(task.title) from archive")
+            .accessibilityHint("Removes this archived task permanently. There is no undo.")
         }
         .padding(.leading, 10)
         .padding(.trailing, 7)
@@ -697,6 +728,20 @@ struct TaskPinButton: View {
         .accessibilityLabel(actionLabel)
         .accessibilityValue(isPinned ? "On" : "Off")
         .accessibilityHint(isPinned ? "Unpins this task." : "Pins this task for the floating task window.")
+    }
+}
+
+struct TaskDeleteButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "trash")
+        }
+        .buttonStyle(BCTaskIconButtonStyle(isActive: false))
+        .help("Delete task")
+        .accessibilityLabel("Delete task")
+        .accessibilityHint("Removes this task permanently. There is no undo.")
     }
 }
 

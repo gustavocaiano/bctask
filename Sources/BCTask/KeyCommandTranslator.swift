@@ -32,6 +32,8 @@ struct TaskSurfaceModifiers: OptionSet, Hashable {
 /// - Command-N          -> focusNewTask
 /// - plain Up / Down    -> focusPreviousTask / focusNextTask
 /// - Command-Left/Right -> moveFocusedTaskBackward / moveFocusedTaskForward
+/// - Command-P          -> pinFocusedTask
+/// - Command-Delete     -> deleteFocusedTask
 /// - plain Escape       -> leaveNewTaskEntry
 /// - plain Tab          -> toggleProjection
 ///
@@ -46,6 +48,8 @@ enum KeyCommandTranslator {
     static let keyCodeRightArrow = UInt16(124) // kVK_RightArrow
     static let keyCodeTab = UInt16(48)         // kVK_Tab
     static let keyCodeEscape = UInt16(53)      // kVK_Escape
+    static let keyCodeP = UInt16(35)           // kVK_ANSI_P
+    static let keyCodeDelete = UInt16(51)      // kVK_ANSI_Delete (backspace)
 
     static func translate(event: NSEvent) -> TaskSurfaceCommand? {
         guard event.type == .keyDown else { return nil }
@@ -64,6 +68,13 @@ enum KeyCommandTranslator {
             return modifiers == .command ? .moveFocusedTaskBackward : nil
         case keyCodeRightArrow:
             return modifiers == .command ? .moveFocusedTaskForward : nil
+        case keyCodeP:
+            return modifiers == .command ? .pinFocusedTask : nil
+        case keyCodeDelete:
+            // Plain backspace and every modified variant except exactly
+            // Command stay in the text system; forward-delete (117) is not
+            // ours either.
+            return modifiers == .command ? .deleteFocusedTask : nil
         case keyCodeTab:
             // Shift-Tab and every other modified Tab remain untouched for
             // standard reverse-focus/system behavior.
@@ -86,6 +97,14 @@ enum MainPanelKeyCommandBridge {
         taskEntryIsFocused: Bool
     ) -> TaskSurfaceCommand? {
         if command == .leaveNewTaskEntry && !taskEntryIsFocused {
+            return nil
+        }
+        // Cmd-Backspace is the standard "delete to beginning of line" text
+        // edit: while the new-task field is focused, deleteFocusedTask must
+        // reach the field instead of the task surface. Cmd-P has no
+        // text-field meaning (and the app has no Print), so pinning is
+        // consumed in both focus states.
+        if command == .deleteFocusedTask && taskEntryIsFocused {
             return nil
         }
         return command

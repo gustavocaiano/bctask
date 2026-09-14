@@ -8,6 +8,8 @@ enum TaskSurfaceCommand: Hashable, Sendable {
     case focusNextTask
     case moveFocusedTaskBackward
     case moveFocusedTaskForward
+    case pinFocusedTask
+    case deleteFocusedTask
     case leaveNewTaskEntry
     case toggleProjection
 }
