@@ -47,11 +47,16 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
     static let mainFrameAutosaveName = "BCTaskMainMenuPanel"
     /// Prefix for stable, task-specific frame-autosave names of pinned panels.
     static let pinnedFrameAutosavePrefix = "BCTaskPinnedPanel-"
+    /// Last user-positioned pinned panel, used as the bootstrap placement for
+    /// a newly pinned task when no floating cards are currently open.
+    static let pinnedPanelPlacementAnchorDefaultsKey = "BCTaskPinnedPanelPlacementAnchor"
 
     /// Mirrors `PinnedTaskCardView`'s accepted sizing contract.
     static let pinnedPanelMinimumSize = CGSize(width: 300, height: 210)
     static let pinnedPanelIdealSize = CGSize(width: 320, height: 230)
     static let pinnedPanelMaxWidth = CGFloat(360)
+    /// The stagger between cards in a pinned-panel cascade.
+    static let pinnedPanelCascadeOffset = CGFloat(24)
 
     /// Restrained catch-up cadence while the app is running.
     private static let catchUpInterval: TimeInterval = 45
@@ -454,9 +459,19 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         // frame restoration so a restored frame is already inside bounds.
         panel.contentMinSize = NSSize(width: Self.pinnedPanelMinimumSize.width, height: Self.pinnedPanelMinimumSize.height)
         panel.contentMaxSize = NSSize(width: Self.pinnedPanelMaxWidth, height: .greatestFiniteMagnitude)
-        if let screen = NSScreen.main {
+        let screens = NSScreen.screens.map { (frame: $0.frame, visibleFrame: $0.visibleFrame) }
+        if let origin = Self.anchoredPinnedPanelOrigin(
+            existingFrames: pinnedPanels.values.map { $0.panel.frame },
+            savedAnchor: Self.pinnedPanelPlacementAnchor(),
+            panelSize: Self.pinnedPanelIdealSize,
+            screens: screens
+        ) {
+            panel.setFrameOrigin(origin)
+        } else if let screen = NSScreen.main {
+            // First run has neither open cards nor a user-positioned anchor,
+            // so retain the original top-right cascade as a safe bootstrap.
             let visible = screen.visibleFrame
-            let shift = CGFloat(pinnedCascadeIndex) * 24
+            let shift = CGFloat(pinnedCascadeIndex) * Self.pinnedPanelCascadeOffset
             pinnedCascadeIndex += 1
             panel.setFrameOrigin(
                 NSPoint(
@@ -472,6 +487,82 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         panel.delegate = self
         panel.orderFrontRegardless() // visible without activating the app
         pinnedPanels[id] = PinnedPanelEntry(panel: panel, content: content)
+    }
+
+    /// Selects an on-screen staggered origin for an unsaved pinned card.
+    /// Existing cards take precedence so newly pinned tasks join the visible
+    /// cluster; when none are open, the most recently user-moved card supplies
+    /// the same-screen approximation across launches. `nil` leaves the caller
+    /// to use its first-run fallback.
+    static func anchoredPinnedPanelOrigin(
+        existingFrames: [NSRect],
+        savedAnchor: NSRect?,
+        panelSize: CGSize,
+        screens: [(frame: NSRect, visibleFrame: NSRect)]
+    ) -> NSPoint? {
+        let liveAnchor = existingFrames.max { lhs, rhs in
+            if lhs.maxY != rhs.maxY { return lhs.maxY < rhs.maxY }
+            return lhs.maxX < rhs.maxX
+        }
+        guard let anchor = liveAnchor ?? savedAnchor else { return nil }
+        let anchorCenter = NSPoint(x: anchor.midX, y: anchor.midY)
+        guard let screen = screens.first(where: { $0.frame.contains(anchorCenter) })
+            ?? screens.first(where: { $0.frame.intersects(anchor) })
+        else { return nil }
+
+        let firstOrigin = Self.clampedPinnedPanelOrigin(
+            NSPoint(
+                x: anchor.minX - Self.pinnedPanelCascadeOffset,
+                y: anchor.minY - Self.pinnedPanelCascadeOffset
+            ),
+            panelSize: panelSize,
+            visibleFrame: screen.visibleFrame
+        )
+
+        // Match the original down-left cascade while walking past overlapping
+        // cards, so a newly pinned task extends the cluster instead of covering
+        // its most recent neighbour.
+        for step in 1...16 {
+            let shift = CGFloat(step) * Self.pinnedPanelCascadeOffset
+            let origin = Self.clampedPinnedPanelOrigin(
+                NSPoint(x: anchor.minX - shift, y: anchor.minY - shift),
+                panelSize: panelSize,
+                visibleFrame: screen.visibleFrame
+            )
+            let candidate = NSRect(origin: origin, size: panelSize)
+            if !existingFrames.contains(where: { $0.intersects(candidate) }) {
+                return origin
+            }
+        }
+        return firstOrigin
+    }
+
+    /// Clamps a new panel's origin to the usable part of its selected screen.
+    static func clampedPinnedPanelOrigin(
+        _ origin: NSPoint,
+        panelSize: CGSize,
+        visibleFrame: NSRect
+    ) -> NSPoint {
+        let maximumX = max(visibleFrame.minX, visibleFrame.maxX - panelSize.width)
+        let maximumY = max(visibleFrame.minY, visibleFrame.maxY - panelSize.height)
+        return NSPoint(
+            x: min(max(origin.x, visibleFrame.minX), maximumX),
+            y: min(max(origin.y, visibleFrame.minY), maximumY)
+        )
+    }
+
+    /// Reads a user-positioned card frame saved by `windowDidMove(_:)`.
+    static func pinnedPanelPlacementAnchor(defaults: UserDefaults = .standard) -> NSRect? {
+        guard let stored = defaults.string(forKey: pinnedPanelPlacementAnchorDefaultsKey) else { return nil }
+        let frame = NSRectFromString(stored)
+        guard frame.width > 0, frame.height > 0 else { return nil }
+        return frame
+    }
+
+    /// Persists the most recent user placement without coupling it to a task's
+    /// own autosaved frame, which still wins when that exact task is re-pinned.
+    static func savePinnedPanelPlacementAnchor(_ frame: NSRect, defaults: UserDefaults = .standard) {
+        defaults.set(NSStringFromRect(frame), forKey: pinnedPanelPlacementAnchorDefaultsKey)
     }
 
     /// Destroys a tracked pinned panel. Called from reconciliation (no model
@@ -561,6 +652,16 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
               let id = pinnedPanels.first(where: { $0.value.panel === closing })?.key
         else { return }
         pinnedPanels.removeValue(forKey: id)
+    }
+
+    /// Captures only user moves of already tracked cards. Creation and frame
+    /// restoration happen before a panel enters `pinnedPanels`, preventing an
+    /// automatic fallback placement from overwriting the user's preference.
+    func windowDidMove(_ notification: Notification) {
+        guard let moved = notification.object as? NSWindow,
+              pinnedPanels.values.contains(where: { $0.panel === moved })
+        else { return }
+        Self.savePinnedPanelPlacementAnchor(moved.frame)
     }
 
     // MARK: - Test seams
