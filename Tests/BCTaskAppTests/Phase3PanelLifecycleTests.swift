@@ -117,6 +117,71 @@ struct KeyShortcutTranslatorTests {
         #expect(MainPanelKeyCommandBridge.commandToConsume(.pinFocusedTask, taskEntryIsFocused: false) == .pinFocusedTask)
     }
 
+    @Test @MainActor func notesEditingFocusDefersEveryCommandToTheTextSystem() {
+        // While a multiline task-notes editor holds keyboard focus, no
+        // task-surface command is consumed: arrow keys move the caret, Tab
+        // and Escape keep their text-editing meanings, and Cmd-Backspace /
+        // Cmd-arrows stay standard edits.
+        let router = TaskCommandRouter()
+        router.updateNotesEditingFocus(true)
+        #expect(router.notesEditingIsFocused)
+
+        for command in [
+            TaskSurfaceCommand.focusNewTask,
+            .focusPreviousTask,
+            .focusNextTask,
+            .moveFocusedTaskBackward,
+            .moveFocusedTaskForward,
+            .pinFocusedTask,
+            .deleteFocusedTask,
+            .leaveNewTaskEntry,
+            .toggleProjection,
+        ] {
+            #expect(
+                MainPanelKeyCommandBridge.commandToConsume(
+                    command,
+                    taskEntryIsFocused: true,
+                    notesEditingIsFocused: router.notesEditingIsFocused
+                ) == nil
+            )
+            #expect(
+                MainPanelKeyCommandBridge.commandToConsume(
+                    command,
+                    taskEntryIsFocused: false,
+                    notesEditingIsFocused: router.notesEditingIsFocused
+                ) == nil
+            )
+        }
+
+        // Leaving the notes editor restores the legacy routing exactly.
+        router.updateNotesEditingFocus(false)
+        #expect(!router.notesEditingIsFocused)
+        #expect(
+            MainPanelKeyCommandBridge.commandToConsume(
+                .leaveNewTaskEntry,
+                taskEntryIsFocused: false,
+                notesEditingIsFocused: router.notesEditingIsFocused
+            ) == nil
+        )
+        #expect(
+            MainPanelKeyCommandBridge.commandToConsume(
+                .pinFocusedTask,
+                taskEntryIsFocused: false,
+                notesEditingIsFocused: router.notesEditingIsFocused
+            ) == .pinFocusedTask
+        )
+    }
+
+    @Test func notesEditingFlagDefaultsToLegacyBridgeBehavior() {
+        // Omitting the defaulted parameter (every pre-notes call site) keeps
+        // the documented legacy semantics byte-for-byte.
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.deleteFocusedTask, taskEntryIsFocused: true) == nil)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.deleteFocusedTask, taskEntryIsFocused: false) == .deleteFocusedTask)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.leaveNewTaskEntry, taskEntryIsFocused: true) == .leaveNewTaskEntry)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.leaveNewTaskEntry, taskEntryIsFocused: false) == nil)
+        #expect(MainPanelKeyCommandBridge.commandToConsume(.toggleProjection, taskEntryIsFocused: false) == .toggleProjection)
+    }
+
     @Test func unknownKeysAreNeverConsumed() {
         #expect(KeyCommandTranslator.translate(keyCode: 46, modifiers: []) == nil) // plain M
         #expect(KeyCommandTranslator.translate(keyCode: 46, modifiers: .command) == nil) // Command-M is not ours

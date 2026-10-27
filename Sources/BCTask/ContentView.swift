@@ -402,6 +402,11 @@ private struct TaskShortcutMenu: View {
         .fixedSize()
         .help("Task keyboard shortcuts")
         .accessibilityLabel("Task keyboard shortcuts")
+        // While a notes editor holds keyboard focus every surface shortcut is
+        // suspended (the key monitor yields all keys to the text system); the
+        // menu's key equivalents are gated to match, so e.g. ⌘⌫ can never
+        // delete the focused task mid-note.
+        .disabled(commandRouter.notesEditingIsFocused)
     }
 }
 

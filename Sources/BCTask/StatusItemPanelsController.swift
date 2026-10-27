@@ -316,7 +316,8 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
     func routeMainPanelCommand(_ translatedCommand: TaskSurfaceCommand) -> Bool {
         guard let command = MainPanelKeyCommandBridge.commandToConsume(
             translatedCommand,
-            taskEntryIsFocused: router.taskEntryIsFocused
+            taskEntryIsFocused: router.taskEntryIsFocused,
+            notesEditingIsFocused: router.notesEditingIsFocused
         ) else { return false }
         router.send(command)
         return true

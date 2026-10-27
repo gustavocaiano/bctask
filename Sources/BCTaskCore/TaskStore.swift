@@ -6,6 +6,7 @@ public enum TaskStoreError: Error, Equatable, Sendable {
     case emptyTitle
     case taskNotFound(id: UUID)
     case archivedTasksAreImmutable
+    case notesModifiedElsewhere(id: UUID)
     case restoreRequiresArchivedTask(id: UUID)
     case invalidTransition(from: TaskStatus, to: TaskStatus)
 }
@@ -27,6 +28,17 @@ public enum TaskStoreError: Error, Equatable, Sendable {
 /// - Archived tasks are immutable: any status/pin mutation throws
 ///   `.archivedTasksAreImmutable`. Restoring an archived task is a separate,
 ///   explicit operation: `restoreArchivedTask(id:now:)`.
+/// - Notes are free-form: `updateNotes(id:from:to:now:)` stores the text
+///   verbatim (no trimming, so pasted links keep their exact form), allows
+///   empty notes (clearing), rejects archived tasks, and bumps `updatedAt`
+///   — except that writing the identical current value is a documented
+///   no-op that touches no timestamps, because the UI commits on editor
+///   close and unchanged text must not reorder the most-recently-updated
+///   list. The `from` baseline is the optimistic-concurrency guard for the
+///   one real concurrent-editor case (a pinned panel plus the main surface
+///   editing the same task): a commit whose baseline no longer matches the
+///   store throws `.notesModifiedElsewhere` instead of silently
+///   overwriting the other editor's text.
 /// - Deletion removes any task (live or archived) permanently: there is no
 ///   archive step, no undo, and no timestamp is recorded.
 ///
@@ -87,6 +99,42 @@ public struct TaskStore: Equatable, Sendable {
         }
         guard tasks[index].isPinned != pinned else { return }
         tasks[index].isPinned = pinned
+        tasks[index].updatedAt = now
+    }
+
+    /// Replaces the free-form notes (description, links) of a live task,
+    /// bumping `updatedAt`. Archived tasks are immutable and reject notes
+    /// edits. Notes are stored verbatim (no trimming) so pasted links keep
+    /// their exact form; empty notes are allowed (clearing). Writing the
+    /// identical current value is a documented no-op that touches no
+    /// timestamps — the UI commits on editor close, and unchanged text must
+    /// not reorder the most-recently-updated list.
+    ///
+    /// `baseline` is the notes value the caller read when it seeded its
+    /// draft: if the store has moved to some OTHER value in the meantime,
+    /// a concurrent editor committed first, and this commit throws
+    /// `.notesModifiedElsewhere` rather than silently overwriting it. Text
+    /// that already equals the stored notes never conflicts (re-committing
+    /// the same content is always safe); a caller re-reads the store to
+    /// make overwriting deliberate.
+    public mutating func updateNotes(
+        id: UUID,
+        from baseline: String,
+        to newNotes: String,
+        now: Date
+    ) throws {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else {
+            throw TaskStoreError.taskNotFound(id: id)
+        }
+        guard !tasks[index].isArchived else {
+            throw TaskStoreError.archivedTasksAreImmutable
+        }
+        let stored = tasks[index].notes
+        guard stored == baseline || stored == newNotes else {
+            throw TaskStoreError.notesModifiedElsewhere(id: id)
+        }
+        guard stored != newNotes else { return }
+        tasks[index].notes = newNotes
         tasks[index].updatedAt = now
     }
 

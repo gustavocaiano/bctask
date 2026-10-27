@@ -3,7 +3,22 @@ import Foundation
 /// The persisted document format. Wrapped in a schema version so future
 /// format changes can migrate or reject old files explicitly.
 public struct TaskDocument: Codable, Equatable, Sendable {
-    public static let currentSchemaVersion = 1
+    /// Current on-disk format. Version 2 added `TaskItem.notes`; every
+    /// document this build writes carries it.
+    public static let currentSchemaVersion = 2
+
+    /// Schema versions this build reads: 2 (current) and 1 (legacy).
+    ///
+    /// Why 2 exists: a pre-notes build decodes a schema-1 file fine, but
+    /// its encoder knows only the old fields, so its next mutation would
+    /// rewrite the document WITHOUT the notes key — silently deleting
+    /// every task's notes. Bumping the written version turns that silent
+    /// data loss into an explicit refusal: older builds reject version 2
+    /// with `unsupportedSchema` (their locked state) instead of ever
+    /// writing. Version 1 stays readable because both notes-less documents
+    /// and interim notes-bearing documents used it; the first accepted
+    /// mutation rewrites them as version 2.
+    public static let readableSchemaVersions: Set<Int> = [1, 2]
 
     public var schemaVersion: Int
     public var tasks: [TaskItem]
@@ -26,7 +41,7 @@ public enum TaskFileError: Error, Equatable, Sendable {
 /// Strict document invariants, enforced on BOTH encode and decode
 /// (reject, never silently repair):
 /// - No duplicate task IDs.
-/// - Schema-1 shapes:
+/// - Task shapes (identical under schemas 1 and 2):
 ///   - Active Todo/Doing tasks carry no completion/archive timestamps.
 ///   - Active Done tasks carry `completedAt` and no `archivedAt`.
 ///   - Archived tasks must be Done, carry `completedAt` and `archivedAt`,
@@ -50,7 +65,7 @@ public enum TaskDocumentCodec {
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .secondsSince1970
         let document = try decoder.decode(TaskDocument.self, from: data)
-        guard document.schemaVersion == TaskDocument.currentSchemaVersion else {
+        guard TaskDocument.readableSchemaVersions.contains(document.schemaVersion) else {
             throw TaskFileError.unsupportedSchema(document.schemaVersion)
         }
         try validate(document.tasks)
