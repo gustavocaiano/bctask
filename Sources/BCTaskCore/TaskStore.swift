@@ -27,6 +27,12 @@ public enum TaskStoreError: Error, Equatable, Sendable {
 /// - Archived tasks are immutable: any status/pin mutation throws
 ///   `.archivedTasksAreImmutable`. Restoring an archived task is a separate,
 ///   explicit operation: `restoreArchivedTask(id:now:)`.
+/// - Notes are free-form: `updateNotes(id:to:now:)` stores the text verbatim
+///   (no trimming, so pasted links keep their exact form), allows empty notes
+///   (clearing), rejects archived tasks, and bumps `updatedAt` — except that
+///   writing the identical current value is a documented no-op that touches
+///   no timestamps, because the UI commits on editor close and unchanged text
+///   must not reorder the most-recently-updated list.
 /// - Deletion removes any task (live or archived) permanently: there is no
 ///   archive step, no undo, and no timestamp is recorded.
 ///
@@ -87,6 +93,25 @@ public struct TaskStore: Equatable, Sendable {
         }
         guard tasks[index].isPinned != pinned else { return }
         tasks[index].isPinned = pinned
+        tasks[index].updatedAt = now
+    }
+
+    /// Replaces the free-form notes (description, links) of a live task,
+    /// bumping `updatedAt`. Archived tasks are immutable and reject notes
+    /// edits. Notes are stored verbatim (no trimming) so pasted links keep
+    /// their exact form; empty notes are allowed (clearing). Writing the
+    /// identical current value is a documented no-op that touches no
+    /// timestamps — the UI commits on editor close, and unchanged text must
+    /// not reorder the most-recently-updated list.
+    public mutating func updateNotes(id: UUID, to newNotes: String, now: Date) throws {
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else {
+            throw TaskStoreError.taskNotFound(id: id)
+        }
+        guard !tasks[index].isArchived else {
+            throw TaskStoreError.archivedTasksAreImmutable
+        }
+        guard tasks[index].notes != newNotes else { return }
+        tasks[index].notes = newNotes
         tasks[index].updatedAt = now
     }
 

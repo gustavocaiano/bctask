@@ -2,9 +2,10 @@
 
 A lightweight native macOS menu-bar todo app with a dark/cyan interface.
 It lives in the menu bar, toggles a movable main surface on repeated menu-bar
-clicks, supports list and kanban views, archives completed tasks after one
-hour, exposes the archive, and can pin any task in an always-on-top floating
-panel.
+clicks, supports list and kanban views, keeps a free-form note (with
+automatically detected, clickable links) on every task, archives completed
+tasks after one hour, exposes the archive, and can pin any task in an
+always-on-top floating panel.
 
 ## Requirements
 
@@ -15,7 +16,7 @@ panel.
 
 ## Build and test
 
-- `scripts/test.sh` — canonical test runner (110 Swift Testing tests). Bare
+- `scripts/test.sh` — canonical test runner (129 Swift Testing tests). Bare
   `swift test` silently discovers zero tests on CLT-only machines because the
   Swift Testing framework lives outside the SDK; the script derives the needed
   framework/plugin paths from the active developer directory, passes them to
@@ -112,12 +113,28 @@ distributably signed artifact.
   targets. Dragging never manually reorders cards within a column; the existing
   most-recently-updated ordering remains authoritative. Status buttons and
   menus remain available as non-drag alternatives.
+- Every task can carry a **note**: a free-form description where URLs
+  (web links, mail addresses) are detected automatically and open in your
+  default browser when clicked. Click the note button (the note icon beside
+  the status controls in a row or card) to open the editor; click **Done** or
+  press `Escape` to save and close. Notes show as a clipped preview in the
+  list (3 lines), on Kanban cards (2 lines), in archive rows (1 line), and
+  scrollable in the floating pinned panel — always with working links.
+- Notes commit only when the editor closes — typing never saves
+  per keystroke, and closing an unchanged editor writes nothing, so the
+  most-recently-updated ordering never shuffles from a note you merely
+  glanced at. Editing notes bumps the task to the top of the list, like any
+  other change. Archived tasks are immutable, so their notes stay read-only
+  (restoring the task makes them editable again). Notes persist in the task
+  file alongside everything else; older BCTask data loads with empty notes
+  and older app builds simply ignore the new field.
 
 ### Keyboard shortcuts (while the main surface is key)
 
 - `Command-N` — focus the new-task field
 - `Escape` — while editing, leave the new-task field without clearing its
-  draft; otherwise hide the main panel (the app remains available in the menu
+  draft; while the notes editor is focused, save and close the notes editor;
+  otherwise hide the main panel (the app remains available in the menu
   bar)
 - `Tab` — toggle List ↔ Kanban while viewing active tasks
   - While typing a new task, Tab is intentionally ignored. Press `Escape`
@@ -129,6 +146,11 @@ distributably signed artifact.
 - `Command-Delete` — delete the focused task (while typing a new task,
   Command-Delete keeps its standard text behavior and is not a delete
   shortcut)
+- While the **notes editor** holds keyboard focus, every shortcut above is
+  suspended: arrow keys move the caret, `Tab` and `Escape` keep their text
+  meanings, and `Command-Delete` / `Command-Left` / `Command-Right` stay
+  standard text edits. One editor is open at a time; opening another row's or
+  card's editor saves the current draft first.
 
 ## Project layout
 
@@ -149,4 +171,7 @@ distributably signed artifact.
   tests run through `scripts/test.sh`.
 - Interactive menu-bar click behavior (left toggle / right menu) and pinned
   panel visibility across Spaces were validated by design and smoke launch,
-  not by UI automation.
+  not by UI automation. The notes editor's live keyboard behavior (Escape
+  interception via the hidden cancel action, focus handoff while the main
+  surface is not key) and rendered link styling follow the same validation
+  level pending a build with a full toolchain.

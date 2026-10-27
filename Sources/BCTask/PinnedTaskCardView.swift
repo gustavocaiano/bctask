@@ -8,6 +8,11 @@ struct PinnedTaskCardView: View {
     @ObservedObject var model: AppModel
     let taskID: UUID
 
+    /// Local notes editing state for this single card: one card, one editor,
+    /// so the draft can live right here instead of in a shared surface.
+    @State private var isEditingNotes = false
+    @State private var notesDraft = ""
+
     var body: some View {
         ZStack {
             BCTaskBackground()
@@ -56,6 +61,12 @@ struct PinnedTaskCardView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(BCTaskTheme.accent)
                 Spacer()
+                TaskNoteButton(
+                    hasNotes: TaskNotes.hasContent(task.notes),
+                    isEditing: isEditingNotes
+                ) {
+                    toggleNotesEditing(for: task)
+                }
                 TaskPinButton(isPinned: task.isPinned) {
                     model.setPinned(task, !task.isPinned)
                 }
@@ -68,6 +79,26 @@ struct PinnedTaskCardView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityAddTraits(.isHeader)
                 TaskTimingLabel(task: task)
+            }
+
+            // Notes sit between the title block and Status: the card's whole
+            // point is keeping one task's detail in front of you, and links
+            // here open in the default browser without leaving the panel.
+            // Guarded so a note-less card keeps exactly its old layout.
+            if isEditingNotes || TaskNotes.hasContent(task.notes) {
+                TaskNotesSectionView(
+                    task: task,
+                    previewMaxHeight: 76,
+                    editorMinHeight: 56,
+                    editorMaxHeight: 76,
+                    isEditing: isEditingNotes,
+                    draft: $notesDraft,
+                    onCommit: { text in closeNotesEditor(committing: text, for: task) },
+                    // Pinned panels are separate nonactivating windows: the main
+                    // panel's key monitor only translates while the main panel
+                    // is key, so there is no shared routing flag to keep in sync.
+                    onEditingFocusChanged: { _ in }
+                )
             }
 
             Rectangle()
@@ -104,6 +135,27 @@ struct PinnedTaskCardView: View {
                 .fill(BCTaskTheme.accent)
                 .frame(height: 2)
         }
+    }
+
+    /// Note button in the header: commits and closes, or opens with a fresh
+    /// draft seeded from the persisted notes.
+    private func toggleNotesEditing(for task: TaskItem) {
+        if isEditingNotes {
+            closeNotesEditor(committing: notesDraft, for: task)
+            return
+        }
+        notesDraft = task.notes
+        isEditingNotes = true
+    }
+
+    /// The single commit point: disk-first `setNotes`, once, on close only.
+    private func closeNotesEditor(committing text: String, for task: TaskItem) {
+        guard isEditingNotes else { return }
+        isEditingNotes = false
+        notesDraft = ""
+        let notes = TaskNotes.trimmed(text)
+        guard notes != task.notes else { return }
+        model.setNotes(task, notes)
     }
 
     private var unavailableState: some View {

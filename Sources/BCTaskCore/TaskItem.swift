@@ -17,9 +17,19 @@ public enum TaskStatus: String, Codable, CaseIterable, Hashable, Sendable {
 ///   so catch-up after relaunch/sleep is deterministic.
 /// - `archivedAt` records the actual time of archival and is cleared when the task
 ///   is reopened. Archived tasks are immutable and never pinned.
+///
+/// Notes semantics:
+/// - `notes` is free-form detail text (a description, links, anything the user
+///   wants to keep with the task). It is stored verbatim and only ever edited
+///   through `TaskStore.updateNotes`; empty string means "no notes".
+/// - Backward compatibility: the JSON schema stays 1. Older documents have no
+///   `"notes"` key and decode with `notes == ""` (custom `init(from:)` uses
+///   `decodeIfPresent`); older app binaries simply ignore the extra key when
+///   reading newer documents, so no migration is needed in either direction.
 public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     public let id: UUID
     public var title: String
+    public var notes: String
     public var status: TaskStatus
     public let createdAt: Date
     public var updatedAt: Date
@@ -27,11 +37,24 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     public var archivedAt: Date?
     public var isPinned: Bool
 
+    private enum CodingKeys: String, CodingKey {
+        case id
+        case title
+        case notes
+        case status
+        case createdAt
+        case updatedAt
+        case completedAt
+        case archivedAt
+        case isPinned
+    }
+
     /// Full initializer. Public so persistence and deterministic tests can
     /// construct exact states; all user-facing mutations go through `TaskStore`.
     public init(
         id: UUID = UUID(),
         title: String,
+        notes: String = "",
         status: TaskStatus = .todo,
         createdAt: Date,
         updatedAt: Date,
@@ -41,12 +64,30 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     ) {
         self.id = id
         self.title = title
+        self.notes = notes
         self.status = status
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.completedAt = completedAt
         self.archivedAt = archivedAt
         self.isPinned = isPinned
+    }
+
+    /// Decodes with backward compatibility: documents persisted before `notes`
+    /// existed carry no `"notes"` key and must decode as empty notes rather
+    /// than fail. Encoding stays compiler-synthesized and always writes the
+    /// field (schema 1 tolerates the extra key in both directions).
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        title = try container.decode(String.self, forKey: .title)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes) ?? ""
+        status = try container.decode(TaskStatus.self, forKey: .status)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        completedAt = try container.decodeIfPresent(Date.self, forKey: .completedAt)
+        archivedAt = try container.decodeIfPresent(Date.self, forKey: .archivedAt)
+        isPinned = try container.decode(Bool.self, forKey: .isPinned)
     }
 
     /// Creates a fresh (unarchived, unpinned) task with the given title.

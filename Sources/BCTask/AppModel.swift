@@ -87,6 +87,13 @@ final class AppModel: ObservableObject {
         mutate { store, at in try store.setPinned(pinned, for: task.id, now: at) }
     }
 
+    /// Replaces a live task's free-form notes (description, links). The editor
+    /// commits once on close and never per keystroke; unchanged notes are a
+    /// domain no-op, so they never write to disk (see `mutate`).
+    func setNotes(_ task: TaskItem, _ notes: String) {
+        mutate { store, at in try store.updateNotes(id: task.id, to: notes, now: at) }
+    }
+
     /// Permanently deletes a task (live or archived). Immediate; no archive step.
     func delete(_ task: TaskItem) {
         mutate { store, _ in try store.deleteTask(id: task.id) }

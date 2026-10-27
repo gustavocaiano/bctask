@@ -94,8 +94,17 @@ enum KeyCommandTranslator {
 enum MainPanelKeyCommandBridge {
     static func commandToConsume(
         _ command: TaskSurfaceCommand,
-        taskEntryIsFocused: Bool
+        taskEntryIsFocused: Bool,
+        notesEditingIsFocused: Bool = false
     ) -> TaskSurfaceCommand? {
+        // While a multiline task-notes editor holds keyboard focus, the text
+        // system owns every key: arrow keys move the caret, Tab and Escape
+        // keep their text-editing meaning, and Cmd-Delete / Cmd-arrows stay
+        // standard edits. No task-surface command is consumed, so the event
+        // falls through to AppKit's normal responder chain untouched.
+        if notesEditingIsFocused {
+            return nil
+        }
         if command == .leaveNewTaskEntry && !taskEntryIsFocused {
             return nil
         }

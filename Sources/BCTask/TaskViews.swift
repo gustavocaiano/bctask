@@ -3,53 +3,162 @@ import BCTaskCore
 
 struct TaskListView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var commandRouter: TaskCommandRouter
     let tasks: [TaskItem]
     let focusedTaskID: UUID?
     let onFocusTask: (UUID) -> Void
 
+    /// One open notes editor per surface: expanding a second row collapses the
+    /// first, and the draft lives here (not in the row) so a collapsing editor
+    /// can still be committed by the surface that owns it.
+    @State private var notesEditingTaskID: UUID?
+    @State private var notesDraft = ""
+
     var body: some View {
-        if tasks.isEmpty {
-            EmptyTaskStateView(
-                symbol: "checkmark.circle",
-                title: "Nothing on your list",
-                message: "Add a task above when something comes up."
-            )
-        } else {
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(spacing: 7) {
-                        ForEach(tasks) { task in
-                            TaskListRowView(
-                                task: task,
-                                availableTargets: model.availableTargets(for: task),
-                                isFocused: focusedTaskID == task.id,
-                                onFocus: { onFocusTask(task.id) },
-                                onStatus: { model.setStatus(task, to: $0) },
-                                onPin: { model.setPinned(task, $0) },
-                                onDelete: { model.delete(task) }
-                            )
-                            .id(task.id)
+        Group {
+            if tasks.isEmpty {
+                EmptyTaskStateView(
+                    symbol: "checkmark.circle",
+                    title: "Nothing on your list",
+                    message: "Add a task above when something comes up."
+                )
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 7) {
+                            ForEach(tasks) { task in
+                                listRow(for: task)
+                                    .id(task.id)
+                            }
                         }
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 2)
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 2)
+                    .onChange(of: focusedTaskID) { taskID in
+                        guard let taskID else { return }
+                        proxy.scrollTo(taskID, anchor: .center)
+                    }
                 }
-                .onChange(of: focusedTaskID) { taskID in
-                    guard let taskID else { return }
-                    proxy.scrollTo(taskID, anchor: .center)
+                .onDisappear {
+                    // This subtree is the only home of the notes editor: when
+                    // it goes away (list emptied by archival, or the whole
+                    // surface switched to Kanban/Archive) no editor survives,
+                    // so the keyboard-routing flag must not survive either.
+                    commandRouter.updateNotesEditingFocus(false)
                 }
             }
         }
+        .onChange(of: taskIDs) { ids in
+            // The edited task left the surface (archived, restored, or
+            // deleted): drop the editor instead of keeping a dangling one.
+            // Attached OUTSIDE the empty/non-empty branch so the transition
+            // to an empty list (the branch flip) still observes the change.
+            guard let notesEditingTaskID, !ids.contains(notesEditingTaskID) else { return }
+            abandonNotesEditing(for: nil)
+        }
+    }
+
+    /// One row, built in its own scope to keep the list body type-checkable
+    /// now that rows also carry notes state.
+    private func listRow(for task: TaskItem) -> some View {
+        TaskListRowView(
+            task: task,
+            availableTargets: model.availableTargets(for: task),
+            isFocused: focusedTaskID == task.id,
+            isNotesEditing: notesEditingTaskID == task.id,
+            notesDraft: notesDraftBinding(for: task),
+            onFocus: { onFocusTask(task.id) },
+            onToggleNotes: { toggleNotesEditing(for: task) },
+            onCommitNotes: { text in closeNotesEditor(committing: text, for: task) },
+            onNotesEditingFocus: { isFocused in
+                // Task-guarded: only the currently edited task's editor may
+                // move the routing flag (switching editors never lets the
+                // outgoing editor's last event move the flag of the new one).
+                guard notesEditingTaskID == task.id else { return }
+                commandRouter.updateNotesEditingFocus(isFocused)
+            },
+            onStatus: { model.setStatus(task, to: $0) },
+            onPin: { model.setPinned(task, $0) },
+            onDelete: {
+                abandonNotesEditing(for: task)
+                model.delete(task)
+            }
+        )
+    }
+
+    private var taskIDs: [UUID] {
+        tasks.map(\.id)
+    }
+
+    private func notesDraftBinding(for task: TaskItem) -> Binding<String> {
+        notesEditingTaskID == task.id ? $notesDraft : .constant(task.notes)
+    }
+
+    /// Note-button tap in the row cluster: collapse-and-commit when it closes
+    /// its own editor, otherwise commit any open draft and hand the editor to
+    /// this task.
+    private func toggleNotesEditing(for task: TaskItem) {
+        if notesEditingTaskID == task.id {
+            closeNotesEditor(committing: notesDraft, for: task)
+            return
+        }
+        commitOpenNotes()
+        notesEditingTaskID = task.id
+        notesDraft = task.notes
+        commandRouter.updateNotesEditingFocus(true)
+        onFocusTask(task.id)
+    }
+
+    private func closeNotesEditor(committing text: String, for task: TaskItem) {
+        guard notesEditingTaskID == task.id else { return }
+        notesEditingTaskID = nil
+        notesDraft = ""
+        commandRouter.updateNotesEditingFocus(false)
+        persistNotes(TaskNotes.trimmed(text), into: task)
+    }
+
+    /// Commits the open draft so another editor can take its place.
+    private func commitOpenNotes() {
+        guard let editingID = notesEditingTaskID,
+              let task = tasks.first(where: { $0.id == editingID })
+        else { return }
+        notesEditingTaskID = nil
+        let text = TaskNotes.trimmed(notesDraft)
+        notesDraft = ""
+        persistNotes(text, into: task)
+    }
+
+    /// Drops editor state without writing: used when the edited task is being
+    /// removed, so a doomed commit cannot be raised against a missing task.
+    private func abandonNotesEditing(for task: TaskItem?) {
+        guard let editingID = notesEditingTaskID else { return }
+        if let task, task.id != editingID { return }
+        notesEditingTaskID = nil
+        notesDraft = ""
+        commandRouter.updateNotesEditingFocus(false)
+    }
+
+    /// Notes commits are disk-first and only ever happen on editor close: every
+    /// commit bumps `updatedAt`, which reorders this most-recently-updated list.
+    private func persistNotes(_ notes: String, into task: TaskItem) {
+        guard notes != task.notes else { return }
+        model.setNotes(task, notes)
     }
 }
 
 struct TaskKanbanView: View {
     @EnvironmentObject private var model: AppModel
+    @EnvironmentObject private var commandRouter: TaskCommandRouter
     let tasks: [TaskItem]
     let focusedTaskID: UUID?
     let onFocusTask: (UUID) -> Void
 
     @State private var draggedTaskID: UUID?
+
+    /// One open notes editor across the whole board (all three lanes), so
+    /// expanding a card in another column closes the current editor.
+    @State private var notesEditingTaskID: UUID?
+    @State private var notesDraft = ""
 
     var body: some View {
         GeometryReader { geometry in
@@ -57,32 +166,7 @@ struct TaskKanbanView: View {
                 ScrollView {
                     HStack(alignment: .top, spacing: 10) {
                         ForEach(TaskStatus.allCases, id: \.self) { status in
-                            KanbanColumnView(
-                                status: status,
-                                tasks: tasks.filter { $0.status == status },
-                                allTasks: tasks,
-                                focusedTaskID: focusedTaskID,
-                                draggedTaskID: draggedTaskID,
-                                minimumHeight: max(geometry.size.height - 4, 250),
-                                availableTargets: model.availableTargets,
-                                onFocus: onFocusTask,
-                                onDragBegan: { draggedTaskID = $0 },
-                                onDragFinished: { draggedTaskID = nil },
-                                onStatus: { task, target in
-                                    guard model.availableTargets(for: task).contains(target) else {
-                                        return false
-                                    }
-                                    model.setStatus(task, to: target)
-                                    onFocusTask(task.id)
-                                    return true
-                                },
-                                onPin: { task, pinned in
-                                    model.setPinned(task, pinned)
-                                },
-                                onDelete: { task in
-                                    model.delete(task)
-                                }
-                            )
+                            column(for: status, in: geometry)
                         }
                     }
                     .padding(.horizontal, 16)
@@ -93,7 +177,108 @@ struct TaskKanbanView: View {
                     proxy.scrollTo(taskID, anchor: .center)
                 }
             }
+            .onChange(of: taskIDs) { ids in
+                guard let notesEditingTaskID, !ids.contains(notesEditingTaskID) else { return }
+                abandonNotesEditing(for: nil)
+            }
+            .onDisappear {
+                // The board is the only home of the notes editor: switching
+                // projections or sections destroys it, and the keyboard-
+                // routing flag must not outlive the editor it protects.
+                commandRouter.updateNotesEditingFocus(false)
+            }
         }
+    }
+
+    /// One lane, built in its own scope so the board body stays type-checkable
+    /// with the extra notes plumbing.
+    private func column(for status: TaskStatus, in geometry: GeometryProxy) -> some View {
+        KanbanColumnView(
+            status: status,
+            tasks: tasks.filter { $0.status == status },
+            allTasks: tasks,
+            focusedTaskID: focusedTaskID,
+            draggedTaskID: draggedTaskID,
+            minimumHeight: max(geometry.size.height - 4, 250),
+            availableTargets: model.availableTargets,
+            isNotesEditing: { task in notesEditingTaskID == task.id },
+            notesDraftBinding: { task in notesDraftBinding(for: task) },
+            onToggleNotes: { task in toggleNotesEditing(for: task) },
+            onCommitNotes: { task, text in closeNotesEditor(committing: text, for: task) },
+            onNotesEditingFocus: { task, isFocused in
+                guard notesEditingTaskID == task.id else { return }
+                commandRouter.updateNotesEditingFocus(isFocused)
+            },
+            onFocus: onFocusTask,
+            onDragBegan: { draggedTaskID = $0 },
+            onDragFinished: { draggedTaskID = nil },
+            onStatus: { task, target in
+                guard model.availableTargets(for: task).contains(target) else {
+                    return false
+                }
+                model.setStatus(task, to: target)
+                onFocusTask(task.id)
+                return true
+            },
+            onPin: { task, pinned in
+                model.setPinned(task, pinned)
+            },
+            onDelete: { task in
+                abandonNotesEditing(for: task)
+                model.delete(task)
+            }
+        )
+    }
+
+    private var taskIDs: [UUID] {
+        tasks.map(\.id)
+    }
+
+    private func notesDraftBinding(for task: TaskItem) -> Binding<String> {
+        notesEditingTaskID == task.id ? $notesDraft : .constant(task.notes)
+    }
+
+    private func toggleNotesEditing(for task: TaskItem) {
+        if notesEditingTaskID == task.id {
+            closeNotesEditor(committing: notesDraft, for: task)
+            return
+        }
+        commitOpenNotes()
+        notesEditingTaskID = task.id
+        notesDraft = task.notes
+        commandRouter.updateNotesEditingFocus(true)
+        onFocusTask(task.id)
+    }
+
+    private func closeNotesEditor(committing text: String, for task: TaskItem) {
+        guard notesEditingTaskID == task.id else { return }
+        notesEditingTaskID = nil
+        notesDraft = ""
+        commandRouter.updateNotesEditingFocus(false)
+        persistNotes(TaskNotes.trimmed(text), into: task)
+    }
+
+    private func commitOpenNotes() {
+        guard let editingID = notesEditingTaskID,
+              let task = tasks.first(where: { $0.id == editingID })
+        else { return }
+        notesEditingTaskID = nil
+        let text = TaskNotes.trimmed(notesDraft)
+        notesDraft = ""
+        persistNotes(text, into: task)
+    }
+
+    private func abandonNotesEditing(for task: TaskItem?) {
+        guard let editingID = notesEditingTaskID else { return }
+        if let task, task.id != editingID { return }
+        notesEditingTaskID = nil
+        notesDraft = ""
+        commandRouter.updateNotesEditingFocus(false)
+    }
+
+    private func persistNotes(_ notes: String, into task: TaskItem) {
+        guard notes != task.notes else { return }
+        model.setNotes(task, notes)
     }
 }
 
@@ -158,7 +343,12 @@ struct TaskListRowView: View {
     let task: TaskItem
     let availableTargets: [TaskStatus]
     let isFocused: Bool
+    let isNotesEditing: Bool
+    @Binding var notesDraft: String
     let onFocus: () -> Void
+    let onToggleNotes: () -> Void
+    let onCommitNotes: (String) -> Void
+    let onNotesEditingFocus: (Bool) -> Void
     let onStatus: (TaskStatus) -> Void
     let onPin: (Bool) -> Void
     let onDelete: () -> Void
@@ -181,6 +371,19 @@ struct TaskListRowView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 TaskTimingLabel(task: task)
+
+                // Collapsed rows without notes contribute nothing here, so an
+                // untouched row keeps exactly its previous layout.
+                if isNotesEditing || TaskNotes.hasContent(task.notes) {
+                    TaskNotesSectionView(
+                        task: task,
+                        previewLineLimit: 3,
+                        isEditing: isNotesEditing,
+                        draft: $notesDraft,
+                        onCommit: onCommitNotes,
+                        onEditingFocusChanged: onNotesEditingFocus
+                    )
+                }
             }
             .frame(minWidth: 130, maxWidth: .infinity, alignment: .leading)
 
@@ -191,6 +394,12 @@ struct TaskListRowView: View {
                 currentStatus: task.status,
                 availableTargets: availableTargets,
                 onSelect: onStatus
+            )
+
+            TaskNoteButton(
+                hasNotes: TaskNotes.hasContent(task.notes),
+                isEditing: isNotesEditing,
+                action: onToggleNotes
             )
 
             TaskPinButton(isPinned: task.isPinned) {
@@ -297,6 +506,11 @@ private struct KanbanColumnView: View {
     let draggedTaskID: UUID?
     let minimumHeight: CGFloat
     let availableTargets: (TaskItem) -> [TaskStatus]
+    let isNotesEditing: (TaskItem) -> Bool
+    let notesDraftBinding: (TaskItem) -> Binding<String>
+    let onToggleNotes: (TaskItem) -> Void
+    let onCommitNotes: (TaskItem, String) -> Void
+    let onNotesEditingFocus: (TaskItem, Bool) -> Void
     let onFocus: (UUID) -> Void
     let onDragBegan: (UUID) -> Void
     let onDragFinished: () -> Void
@@ -354,19 +568,8 @@ private struct KanbanColumnView: View {
                 .accessibilityElement(children: .combine)
             } else {
                 ForEach(tasks) { task in
-                    KanbanTaskCardView(
-                        task: task,
-                        availableTargets: availableTargets(task),
-                        isFocused: focusedTaskID == task.id,
-                        onFocus: { onFocus(task.id) },
-                        onDragBegan: { onDragBegan(task.id) },
-                        onStatus: { target in
-                            _ = onStatus(task, target)
-                        },
-                        onPin: { onPin(task, $0) },
-                        onDelete: { onDelete(task) }
-                    )
-                    .id(task.id)
+                    card(for: task)
+                        .id(task.id)
                 }
             }
 
@@ -420,6 +623,27 @@ private struct KanbanColumnView: View {
         .accessibilityHint("Drop a Kanban card here to move it to \(status.displayName).")
     }
 
+    /// One card, built in its own scope so the column body stays type-checkable.
+    private func card(for task: TaskItem) -> some View {
+        KanbanTaskCardView(
+            task: task,
+            availableTargets: availableTargets(task),
+            isFocused: focusedTaskID == task.id,
+            isNotesEditing: isNotesEditing(task),
+            notesDraft: notesDraftBinding(task),
+            onFocus: { onFocus(task.id) },
+            onToggleNotes: { onToggleNotes(task) },
+            onCommitNotes: { text in onCommitNotes(task, text) },
+            onNotesEditingFocus: { isFocused in onNotesEditingFocus(task, isFocused) },
+            onDragBegan: { onDragBegan(task.id) },
+            onStatus: { target in
+                _ = onStatus(task, target)
+            },
+            onPin: { onPin(task, $0) },
+            onDelete: { onDelete(task) }
+        )
+    }
+
     private var emptyMessage: String {
         switch status {
         case .todo: "Nothing waiting"
@@ -433,7 +657,12 @@ private struct KanbanTaskCardView: View {
     let task: TaskItem
     let availableTargets: [TaskStatus]
     let isFocused: Bool
+    let isNotesEditing: Bool
+    @Binding var notesDraft: String
     let onFocus: () -> Void
+    let onToggleNotes: () -> Void
+    let onCommitNotes: (String) -> Void
+    let onNotesEditingFocus: (Bool) -> Void
     let onDragBegan: () -> Void
     let onStatus: (TaskStatus) -> Void
     let onPin: (Bool) -> Void
@@ -444,31 +673,22 @@ private struct KanbanTaskCardView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .top, spacing: 5) {
-                Text(task.title)
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(BCTaskTheme.textPrimary)
-                    .lineLimit(5)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+            dragBody
 
-                TaskPinButton(isPinned: task.isPinned) {
-                    onPin(!task.isPinned)
-                }
-
-                TaskDeleteButton {
-                    onDelete()
-                }
+            // The editor deliberately lives outside the `.onDrag` subtree so a
+            // focused TextEditor keeps its own mouse/selection handling while
+            // the card body above it stays draggable.
+            if isNotesEditing {
+                TaskNotesEditor(
+                    taskTitle: task.title,
+                    draft: $notesDraft,
+                    minimumHeight: 68,
+                    maximumHeight: 100,
+                    onCommit: onCommitNotes,
+                    onEditingFocusChanged: onNotesEditingFocus
+                )
+                .transition(.opacity)
             }
-
-            TaskTimingLabel(task: task)
-
-            TaskStatusControl(
-                task: task,
-                availableTargets: availableTargets,
-                compact: true,
-                onSelect: onStatus
-            )
         }
         .padding(.leading, 10)
         .padding(.trailing, 5)
@@ -492,20 +712,66 @@ private struct KanbanTaskCardView: View {
         }
         .contentShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .onTapGesture(perform: onFocus)
+        .onHover { hovering in
+            isHovering = hovering
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isNotesEditing)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(task.title)
+        .accessibilityValue(isFocused ? "Focused, \(task.status.displayName)" : task.status.displayName)
+        .accessibilityHint("Drag to another Kanban column to change status. Status buttons remain available.")
+    }
+
+    /// Card content that carries the drag payload.
+    private var dragBody: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 5) {
+                Text(task.title)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(BCTaskTheme.textPrimary)
+                    .lineLimit(5)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                TaskPinButton(isPinned: task.isPinned) {
+                    onPin(!task.isPinned)
+                }
+
+                TaskDeleteButton {
+                    onDelete()
+                }
+            }
+
+            TaskTimingLabel(task: task)
+
+            if !isNotesEditing && TaskNotes.hasContent(task.notes) {
+                TaskNotesPreview(notes: task.notes, lineLimit: 2)
+            }
+
+            HStack(spacing: 5) {
+                TaskStatusControl(
+                    task: task,
+                    availableTargets: availableTargets,
+                    compact: true,
+                    onSelect: onStatus
+                )
+
+                Spacer(minLength: 4)
+
+                TaskNoteButton(
+                    hasNotes: TaskNotes.hasContent(task.notes),
+                    isEditing: isNotesEditing,
+                    action: onToggleNotes
+                )
+            }
+        }
         .onDrag {
             onDragBegan()
             return KanbanTaskDragPayload(taskID: task.id).itemProvider()
         } preview: {
             KanbanTaskDragPreview(task: task, reduceMotion: reduceMotion)
         }
-        .onHover { hovering in
-            isHovering = hovering
-        }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.12), value: isHovering)
-        .accessibilityElement(children: .contain)
-        .accessibilityLabel(task.title)
-        .accessibilityValue(isFocused ? "Focused, \(task.status.displayName)" : task.status.displayName)
-        .accessibilityHint("Drag to another Kanban column to change status. Status buttons remain available.")
     }
 }
 
@@ -623,7 +889,13 @@ private struct ArchiveTaskRowView: View {
                         .font(.system(size: 11))
                         .foregroundStyle(BCTaskTheme.textTertiary)
                 }
+                // One quiet line of context: read-only, links still clickable,
+                // and never competing with Restore/Delete for width.
+                if TaskNotes.hasContent(task.notes) {
+                    TaskNotesPreview(notes: task.notes, lineLimit: 1, color: BCTaskTheme.textTertiary)
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             Spacer(minLength: 12)
 
