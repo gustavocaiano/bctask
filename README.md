@@ -16,7 +16,7 @@ always-on-top floating panel.
 
 ## Build and test
 
-- `scripts/test.sh` — canonical test runner (129 Swift Testing tests). Bare
+- `scripts/test.sh` — canonical test runner (131 Swift Testing tests). Bare
   `swift test` silently discovers zero tests on CLT-only machines because the
   Swift Testing framework lives outside the SDK; the script derives the needed
   framework/plugin paths from the active developer directory, passes them to

@@ -4,14 +4,17 @@ import BCTaskCore
 @testable import BCTask
 
 /// Focused evidence for the AppModel notes seam:
-/// - a notes commit publishes and persists verbatim,
-/// - identical notes are a no-op and never rewrite the document,
-/// - locked storage refuses notes edits and keeps the accepted snapshot.
+/// - a notes commit publishes and persists verbatim and reports success,
+/// - identical notes are a no-op that never rewrites the document yet still
+///   count as committed (true without a write),
+/// - locked storage, failed disk saves, and archived tasks all refuse the
+///   commit and report false so editors can keep the user's draft mounted.
 @MainActor
 final class AppModelNotesTests {
     private let t0: Date
     private let clock: NotesClock
     private let tempRoot: URL
+    private let storeDirectory: URL
     private let fileStore: TaskFileStore
 
     /// Disposable scenario fixture: each suite instance gets its own disk
@@ -21,7 +24,8 @@ final class AppModelNotesTests {
         clock = NotesClock(start: t0)
         tempRoot = FileManager.default.temporaryDirectory
             .appendingPathComponent("BCTaskAppModelNotesTests-\(UUID().uuidString)", isDirectory: true)
-        fileStore = TaskFileStore(directory: tempRoot.appendingPathComponent("store", isDirectory: true))
+        storeDirectory = tempRoot.appendingPathComponent("store", isDirectory: true)
+        fileStore = TaskFileStore(directory: storeDirectory)
     }
 
     deinit {
@@ -37,7 +41,8 @@ final class AppModelNotesTests {
         model.add("task")
         let task = try #require(model.store.activeTasks.first)
 
-        model.setNotes(task, "Detail: https://example.com/how")
+        let committed = model.setNotes(task, "Detail: https://example.com/how")
+        #expect(committed, "a successful commit reports true")
 
         let updated = try #require(model.store.activeTasks.first)
         #expect(updated.notes == "Detail: https://example.com/how", "the commit publishes verbatim notes")
@@ -59,7 +64,8 @@ final class AppModelNotesTests {
         let bytesAfterSet = try Data(contentsOf: fileStore.fileURL)
 
         clock.advance(to: t0.addingTimeInterval(90))
-        model.setNotes(task, "same text")
+        let committed = model.setNotes(task, "same text")
+        #expect(committed, "identical notes count as committed without writing")
 
         #expect(try Data(contentsOf: fileStore.fileURL) == bytesAfterSet, "identical notes must not rewrite the document")
         #expect(try #require(model.store.activeTasks.first).updatedAt == t0, "identical notes must not bump updatedAt")
@@ -90,10 +96,64 @@ final class AppModelNotesTests {
         model.reload()
         #expect(model.storageError != nil)
 
-        model.setNotes(task, "refused note")
+        let committed = model.setNotes(task, "refused note")
+        #expect(committed == false, "a refused commit reports false so the editor can keep the draft")
 
         #expect(model.store.tasks == [task], "locked storage keeps the last accepted snapshot untouched")
         #expect(try #require(model.store.tasks.first).notes == "", "the refused notes commit must not publish")
+        #expect(model.lastErrorMessage != nil)
+    }
+
+    @Test func setNotesReportsFailureWhenTheDiskSaveFails() throws {
+        let model = makeModel()
+        model.add("task")
+        let task = try #require(model.store.activeTasks.first)
+        let acceptedBytes = try Data(contentsOf: fileStore.fileURL)
+
+        // Make the store directory unwritable so the atomic save fails
+        // (same fixture shape as the persistence-safety suites).
+        try FileManager.default.setAttributes(
+            [.posixPermissions: 0o555],
+            ofItemAtPath: storeDirectory.path
+        )
+        defer {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o755],
+                ofItemAtPath: storeDirectory.path
+            )
+        }
+
+        let committed = model.setNotes(task, "draft worth retrying")
+        #expect(
+            committed == false,
+            "a failed save reports false so the editor keeps the draft"
+        )
+
+        #expect(try #require(model.store.activeTasks.first).notes == "", "a failed save never publishes the note")
+        #expect(model.storageError == nil, "a save failure does not lock storage; retry stays possible")
+        #expect(model.lastErrorMessage != nil)
+        #expect(try Data(contentsOf: fileStore.fileURL) == acceptedBytes, "the disk document stays at the last accepted state")
+    }
+
+    @Test func setNotesIsRefusedForArchivedTasksAndReportsFailure() throws {
+        var done = TaskItem.make(title: "archived subject", now: t0)
+        done.status = .done
+        done.completedAt = t0
+        try fileStore.save(TaskStore(tasks: [done]))
+        let model = makeModel()
+
+        // Cross the one-hour deadline: the mutation's catch-up sweep
+        // archives the subject first, then the notes command applies.
+        clock.advance(to: t0.addingTimeInterval(3600))
+        let committed = model.setNotes(done, "note for the archive")
+        #expect(
+            committed == false,
+            "a commit refused for an archived task reports false"
+        )
+
+        let state = try #require(model.store.tasks.first)
+        #expect(state.isArchived, "the catch-up sweep archived the subject before the command applied")
+        #expect(state.notes == "", "the refused notes commit must not publish")
         #expect(model.lastErrorMessage != nil)
     }
 }

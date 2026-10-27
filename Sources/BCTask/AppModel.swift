@@ -90,8 +90,21 @@ final class AppModel: ObservableObject {
     /// Replaces a live task's free-form notes (description, links). The editor
     /// commits once on close and never per keystroke; unchanged notes are a
     /// domain no-op, so they never write to disk (see `mutate`).
-    func setNotes(_ task: TaskItem, _ notes: String) {
-        mutate { store, at in try store.updateNotes(id: task.id, to: notes, now: at) }
+    ///
+    /// Returns false when the commit was refused (storage locked, task
+    /// missing or archived) or the disk-first save failed, so callers can
+    /// keep the user's draft mounted for retry instead of dropping it.
+    /// Unchanged notes count as committed: the accepted store already
+    /// carries them (the `mutate` no-op path leaves `store` matching).
+    @discardableResult
+    func setNotes(_ task: TaskItem, _ notes: String) -> Bool {
+        mutate { store, at in
+            try store.updateNotes(id: task.id, to: notes, now: at)
+        }
+        guard let updated = store.tasks.first(where: { $0.id == task.id }) else {
+            return false
+        }
+        return updated.notes == notes
     }
 
     /// Permanently deletes a task (live or archived). Immediate; no archive step.

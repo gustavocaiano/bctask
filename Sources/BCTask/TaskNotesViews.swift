@@ -126,8 +126,10 @@ struct TaskNotesSectionView: View {
     var editorMaxHeight: CGFloat = 108
     let isEditing: Bool
     @Binding var draft: String
-    /// Called with the final (already trimmed) text whenever the editor closes.
-    let onCommit: (String) -> Void
+    /// Called with the final (already trimmed) text whenever the editor
+    /// closes. Return false to VETO the close (save refused or failed): the
+    /// editor re-arms and stays open so the draft is never silently lost.
+    let onCommit: (String) -> Bool
     /// Routes "the notes editor owns the keyboard" into the shared command
     /// router. Only live editors push `true`/`false` (appear/resign/close) —
     /// a departing editor publishes nothing, so a re-inserted instance of the
@@ -146,7 +148,7 @@ struct TaskNotesSectionView: View {
         editorMaxHeight: CGFloat = 108,
         isEditing: Bool,
         draft: Binding<String>,
-        onCommit: @escaping (String) -> Void,
+        onCommit: @escaping (String) -> Bool,
         onEditingFocusChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.task = task
@@ -206,7 +208,9 @@ struct TaskNotesEditor: View {
     @Binding var draft: String
     var minimumHeight: CGFloat = 72
     var maximumHeight: CGFloat = 108
-    let onCommit: (String) -> Void
+    /// The commit funnel's verdict: false vetoes the close and keeps the
+    /// editor open with its draft (save refused or failed).
+    let onCommit: (String) -> Bool
     var onEditingFocusChanged: (Bool) -> Void = { _ in }
 
     @FocusState private var isEditing: Bool
@@ -218,7 +222,7 @@ struct TaskNotesEditor: View {
         draft: Binding<String>,
         minimumHeight: CGFloat = 72,
         maximumHeight: CGFloat = 108,
-        onCommit: @escaping (String) -> Void,
+        onCommit: @escaping (String) -> Bool,
         onEditingFocusChanged: @escaping (Bool) -> Void = { _ in }
     ) {
         self.taskTitle = taskTitle
@@ -314,13 +318,22 @@ struct TaskNotesEditor: View {
     }
 
     /// Single commit funnel for every close path (Done, Escape, cluster
-    /// toggle). The surface owns persistence and collapse.
+    /// toggle). The surface owns persistence and may veto the close — a
+    /// refused or failed save re-arms the editor and keeps the draft, which
+    /// is the only copy of the user's text.
     private func close() {
         guard !didClose else { return }
         didClose = true
         let pending = draft
         isEditing = false
         onEditingFocusChanged(false)
-        onCommit(pending)
+        if !onCommit(pending) {
+            // Vetoed by the surface (save refused or failed): re-arm and
+            // keep typing. The routing flag must follow the editor, and the
+            // model's error banner already reports the failure.
+            didClose = false
+            isEditing = true
+            onEditingFocusChanged(true)
+        }
     }
 }

@@ -93,7 +93,9 @@ struct PinnedTaskCardView: View {
                     editorMaxHeight: 76,
                     isEditing: isEditingNotes,
                     draft: $notesDraft,
-                    onCommit: { text in closeNotesEditor(committing: text, for: task) },
+                    onCommit: { text in
+                        return closeNotesEditor(committing: text, for: task)
+                    },
                     // Pinned panels are separate nonactivating windows: the main
                     // panel's key monitor only translates while the main panel
                     // is key, so there is no shared routing flag to keep in sync.
@@ -141,7 +143,9 @@ struct PinnedTaskCardView: View {
     /// draft seeded from the persisted notes.
     private func toggleNotesEditing(for task: TaskItem) {
         if isEditingNotes {
-            closeNotesEditor(committing: notesDraft, for: task)
+            // A failed save keeps the editor open: the verdict is consumed
+            // here so the draft survives for retry.
+            _ = closeNotesEditor(committing: notesDraft, for: task)
             return
         }
         notesDraft = task.notes
@@ -149,13 +153,21 @@ struct PinnedTaskCardView: View {
     }
 
     /// The single commit point: disk-first `setNotes`, once, on close only.
-    private func closeNotesEditor(committing text: String, for task: TaskItem) {
-        guard isEditingNotes else { return }
+    /// Returns false when the save was refused or failed, leaving the editor
+    /// open with its draft — the user's only copy of the text.
+    @discardableResult
+    private func closeNotesEditor(committing text: String, for task: TaskItem) -> Bool {
+        guard isEditingNotes else { return true }
+        let notes = TaskNotes.trimmed(text)
+        guard notes != task.notes else {
+            isEditingNotes = false
+            notesDraft = ""
+            return true
+        }
+        guard model.setNotes(task, notes) else { return false }
         isEditingNotes = false
         notesDraft = ""
-        let notes = TaskNotes.trimmed(text)
-        guard notes != task.notes else { return }
-        model.setNotes(task, notes)
+        return true
     }
 
     private var unavailableState: some View {
