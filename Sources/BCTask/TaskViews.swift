@@ -13,6 +13,10 @@ struct TaskListView: View {
     /// can still be committed by the surface that owns it.
     @State private var notesEditingTaskID: UUID?
     @State private var notesDraft = ""
+    /// Stored notes at editor-open time: the optimistic-concurrency baseline
+    /// every commit carries, so a concurrent editor (the pinned panel for the
+    /// same task) can never be silently overwritten.
+    @State private var notesEditingBaseline = ""
 
     var body: some View {
         Group {
@@ -111,31 +115,37 @@ struct TaskListView: View {
         guard commitOpenNotes() else { return }
         notesEditingTaskID = task.id
         notesDraft = task.notes
+        notesEditingBaseline = task.notes
         commandRouter.updateNotesEditingFocus(true)
         onFocusTask(task.id)
     }
 
     /// Closes the editor owned by `task`, persisting the draft BEFORE any
-    /// editor state is cleared: a refused or failed save keeps the editor
-    /// (and its draft) mounted so the user can retry instead of losing the
-    /// text, while the model's error banner reports why.
+    /// editor state is cleared: a refused, failed, or conflicting save keeps
+    /// the editor (and its draft) mounted so the user can retry instead of
+    /// losing the text, while the model's error banner reports why.
     @discardableResult
     private func closeNotesEditor(committing text: String, for task: TaskItem) -> Bool {
         guard notesEditingTaskID == task.id else { return true }
-        guard persistNotes(TaskNotes.trimmed(text), into: task) else {
+        guard persistNotes(TaskNotes.trimmed(text), into: task, baseline: notesEditingBaseline) else {
+            // Re-anchor the baseline to the store so the deliberate retry
+            // (a second Done or Escape) overwrites on purpose instead of
+            // conflicting forever.
+            notesEditingBaseline = currentStoredNotes(for: task.id)
             commandRouter.updateNotesEditingFocus(true)
             return false
         }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
         return true
     }
 
     /// Commits the open draft whether another editor is about to take its
     /// place or the whole surface is going away (onDisappear). Returns
-    /// false when the save was refused or failed, leaving the editor and
-    /// its draft exactly as they were.
+    /// false when the save was refused, failed, or conflicted with a
+    /// concurrent editor, leaving the editor and its draft mounted.
     @discardableResult
     private func commitOpenNotes() -> Bool {
         guard let editingID = notesEditingTaskID else { return true }
@@ -148,14 +158,17 @@ struct TaskListView: View {
             // against, so fold the editor away instead of clinging to it.
             notesEditingTaskID = nil
             notesDraft = ""
+            notesEditingBaseline = ""
             commandRouter.updateNotesEditingFocus(false)
             return true
         }
-        guard persistNotes(TaskNotes.trimmed(notesDraft), into: task) else {
+        guard persistNotes(TaskNotes.trimmed(notesDraft), into: task, baseline: notesEditingBaseline) else {
+            notesEditingBaseline = currentStoredNotes(for: editingID)
             return false
         }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
         return true
     }
@@ -167,16 +180,25 @@ struct TaskListView: View {
         if let task, task.id != editingID { return }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
+    }
+
+    /// Stored notes for a task right now: the freshness anchor a vetoed
+    /// commit re-reads so its deliberate retry can succeed.
+    private func currentStoredNotes(for id: UUID) -> String {
+        model.store.tasks.first(where: { $0.id == id })?.notes ?? ""
     }
 
     /// Notes commits are disk-first and only ever happen on editor close: every
     /// commit bumps `updatedAt`, which reorders this most-recently-updated list.
-    /// Unchanged notes count as committed without touching the document.
+    /// Unchanged notes (against the open-time baseline) count as committed
+    /// without touching the document; changed notes carry the baseline so a
+    /// concurrent editor can never be silently overwritten.
     @discardableResult
-    private func persistNotes(_ notes: String, into task: TaskItem) -> Bool {
-        guard notes != task.notes else { return true }
-        return model.setNotes(task, notes)
+    private func persistNotes(_ notes: String, into task: TaskItem, baseline: String) -> Bool {
+        guard notes != baseline else { return true }
+        return model.setNotes(task, from: baseline, to: notes)
     }
 }
 
@@ -193,6 +215,10 @@ struct TaskKanbanView: View {
     /// expanding a card in another column closes the current editor.
     @State private var notesEditingTaskID: UUID?
     @State private var notesDraft = ""
+    /// Stored notes at editor-open time: the optimistic-concurrency baseline
+    /// every commit carries, so a concurrent editor (the pinned panel for the
+    /// same task) can never be silently overwritten.
+    @State private var notesEditingBaseline = ""
 
     var body: some View {
         GeometryReader { geometry in
@@ -286,31 +312,37 @@ struct TaskKanbanView: View {
         guard commitOpenNotes() else { return }
         notesEditingTaskID = task.id
         notesDraft = task.notes
+        notesEditingBaseline = task.notes
         commandRouter.updateNotesEditingFocus(true)
         onFocusTask(task.id)
     }
 
     /// Closes the editor owned by `task`, persisting the draft BEFORE any
-    /// editor state is cleared: a refused or failed save keeps the editor
-    /// (and its draft) mounted so the user can retry instead of losing the
-    /// text, while the model's error banner reports why.
+    /// editor state is cleared: a refused, failed, or conflicting save keeps
+    /// the editor (and its draft) mounted so the user can retry instead of
+    /// losing the text, while the model's error banner reports why.
     @discardableResult
     private func closeNotesEditor(committing text: String, for task: TaskItem) -> Bool {
         guard notesEditingTaskID == task.id else { return true }
-        guard persistNotes(TaskNotes.trimmed(text), into: task) else {
+        guard persistNotes(TaskNotes.trimmed(text), into: task, baseline: notesEditingBaseline) else {
+            // Re-anchor the baseline to the store so the deliberate retry
+            // (a second Done or Escape) overwrites on purpose instead of
+            // conflicting forever.
+            notesEditingBaseline = currentStoredNotes(for: task.id)
             commandRouter.updateNotesEditingFocus(true)
             return false
         }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
         return true
     }
 
     /// Commits the open draft whether another editor is about to take its
     /// place or the whole board is going away (onDisappear). Returns
-    /// false when the save was refused or failed, leaving the editor and
-    /// its draft exactly as they were.
+    /// false when the save was refused, failed, or conflicted with a
+    /// concurrent editor, leaving the editor and its draft mounted.
     @discardableResult
     private func commitOpenNotes() -> Bool {
         guard let editingID = notesEditingTaskID else { return true }
@@ -323,14 +355,17 @@ struct TaskKanbanView: View {
             // against, so fold the editor away instead of clinging to it.
             notesEditingTaskID = nil
             notesDraft = ""
+            notesEditingBaseline = ""
             commandRouter.updateNotesEditingFocus(false)
             return true
         }
-        guard persistNotes(TaskNotes.trimmed(notesDraft), into: task) else {
+        guard persistNotes(TaskNotes.trimmed(notesDraft), into: task, baseline: notesEditingBaseline) else {
+            notesEditingBaseline = currentStoredNotes(for: editingID)
             return false
         }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
         return true
     }
@@ -340,15 +375,24 @@ struct TaskKanbanView: View {
         if let task, task.id != editingID { return }
         notesEditingTaskID = nil
         notesDraft = ""
+        notesEditingBaseline = ""
         commandRouter.updateNotesEditingFocus(false)
     }
 
+    /// Stored notes for a task right now: the freshness anchor a vetoed
+    /// commit re-reads so its deliberate retry can succeed.
+    private func currentStoredNotes(for id: UUID) -> String {
+        model.store.tasks.first(where: { $0.id == id })?.notes ?? ""
+    }
+
     /// Notes commits are disk-first and only ever happen on editor close.
-    /// Unchanged notes count as committed without touching the document.
+    /// Unchanged notes (against the open-time baseline) count as committed
+    /// without touching the document; changed notes carry the baseline so a
+    /// concurrent editor can never be silently overwritten.
     @discardableResult
-    private func persistNotes(_ notes: String, into task: TaskItem) -> Bool {
-        guard notes != task.notes else { return true }
-        return model.setNotes(task, notes)
+    private func persistNotes(_ notes: String, into task: TaskItem, baseline: String) -> Bool {
+        guard notes != baseline else { return true }
+        return model.setNotes(task, from: baseline, to: notes)
     }
 }
 

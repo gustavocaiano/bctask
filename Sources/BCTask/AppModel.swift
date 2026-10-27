@@ -91,15 +91,21 @@ final class AppModel: ObservableObject {
     /// commits once on close and never per keystroke; unchanged notes are a
     /// domain no-op, so they never write to disk (see `mutate`).
     ///
+    /// `baseline` is the notes the calling editor read when it seeded its
+    /// draft; a store that has since moved to different notes (a concurrent
+    /// editor — the pinned card and the main surface can both edit one
+    /// task) rejects the commit instead of silently overwriting it.
+    ///
     /// Returns false when the commit was refused (storage locked, task
-    /// missing or archived) or the disk-first save failed, so callers can
-    /// keep the user's draft mounted for retry instead of dropping it.
-    /// Unchanged notes count as committed: the accepted store already
-    /// carries them (the `mutate` no-op path leaves `store` matching).
+    /// missing or archived, notes conflict) or the disk-first save failed,
+    /// so callers can keep the user's draft mounted for retry instead of
+    /// dropping it. Unchanged notes count as committed: the accepted store
+    /// already carries them (the `mutate` no-op path leaves `store`
+    /// matching).
     @discardableResult
-    func setNotes(_ task: TaskItem, _ notes: String) -> Bool {
+    func setNotes(_ task: TaskItem, from baseline: String, to notes: String) -> Bool {
         mutate { store, at in
-            try store.updateNotes(id: task.id, to: notes, now: at)
+            try store.updateNotes(id: task.id, from: baseline, to: notes, now: at)
         }
         guard let updated = store.tasks.first(where: { $0.id == task.id }) else {
             return false

@@ -8,7 +8,10 @@ import BCTaskCore
 /// - identical notes are a no-op that never rewrites the document yet still
 ///   count as committed (true without a write),
 /// - locked storage, failed disk saves, and archived tasks all refuse the
-///   commit and report false so editors can keep the user's draft mounted.
+///   commit and report false so editors can keep the user's draft mounted,
+/// - a stale-baseline commit (a concurrent editor changed the stored notes
+///   first) is refused instead of silently overwriting it, and the
+///   re-anchored retry wins.
 @MainActor
 final class AppModelNotesTests {
     private let t0: Date
@@ -41,7 +44,7 @@ final class AppModelNotesTests {
         model.add("task")
         let task = try #require(model.store.activeTasks.first)
 
-        let committed = model.setNotes(task, "Detail: https://example.com/how")
+        let committed = model.setNotes(task, from: task.notes, to: "Detail: https://example.com/how")
         #expect(committed, "a successful commit reports true")
 
         let updated = try #require(model.store.activeTasks.first)
@@ -60,11 +63,11 @@ final class AppModelNotesTests {
         let model = makeModel()
         model.add("task")
         let task = try #require(model.store.activeTasks.first)
-        model.setNotes(task, "same text")
+        model.setNotes(task, from: task.notes, to: "same text")
         let bytesAfterSet = try Data(contentsOf: fileStore.fileURL)
 
         clock.advance(to: t0.addingTimeInterval(90))
-        let committed = model.setNotes(task, "same text")
+        let committed = model.setNotes(task, from: "same text", to: "same text")
         #expect(committed, "identical notes count as committed without writing")
 
         #expect(try Data(contentsOf: fileStore.fileURL) == bytesAfterSet, "identical notes must not rewrite the document")
@@ -76,8 +79,8 @@ final class AppModelNotesTests {
         let model = makeModel()
         model.add("task")
         let task = try #require(model.store.activeTasks.first)
-        model.setNotes(task, "to be cleared")
-        model.setNotes(task, "")
+        model.setNotes(task, from: task.notes, to: "to be cleared")
+        model.setNotes(task, from: "to be cleared", to: "")
 
         #expect(try #require(model.store.activeTasks.first).notes == "")
         #expect(try #require(try fileStore.load(now: clock.read()).tasks.first).notes == "")
@@ -96,7 +99,7 @@ final class AppModelNotesTests {
         model.reload()
         #expect(model.storageError != nil)
 
-        let committed = model.setNotes(task, "refused note")
+        let committed = model.setNotes(task, from: task.notes, to: "refused note")
         #expect(committed == false, "a refused commit reports false so the editor can keep the draft")
 
         #expect(model.store.tasks == [task], "locked storage keeps the last accepted snapshot untouched")
@@ -123,7 +126,7 @@ final class AppModelNotesTests {
             )
         }
 
-        let committed = model.setNotes(task, "draft worth retrying")
+        let committed = model.setNotes(task, from: task.notes, to: "draft worth retrying")
         #expect(
             committed == false,
             "a failed save reports false so the editor keeps the draft"
@@ -145,7 +148,7 @@ final class AppModelNotesTests {
         // Cross the one-hour deadline: the mutation's catch-up sweep
         // archives the subject first, then the notes command applies.
         clock.advance(to: t0.addingTimeInterval(3600))
-        let committed = model.setNotes(done, "note for the archive")
+        let committed = model.setNotes(done, from: done.notes, to: "note for the archive")
         #expect(
             committed == false,
             "a commit refused for an archived task reports false"
@@ -155,6 +158,38 @@ final class AppModelNotesTests {
         #expect(state.isArchived, "the catch-up sweep archived the subject before the command applied")
         #expect(state.notes == "", "the refused notes commit must not publish")
         #expect(model.lastErrorMessage != nil)
+    }
+
+    @Test func concurrentEditorsCannotSilentlyOverwriteEachOther() throws {
+        let model = makeModel()
+        model.add("task")
+        let task = try #require(model.store.activeTasks.first)
+
+        // The main surface commits first with a fresh baseline: it succeeds.
+        let mainCommitted = model.setNotes(task, from: task.notes, to: "main draft")
+        #expect(mainCommitted)
+
+        // The pinned panel's editor was opened before that commit, so it
+        // still carries the ORIGINAL (empty) baseline: its commit conflicts
+        // and must be refused rather than silently overwriting the main
+        // surface's text.
+        let pinnedCommitted = model.setNotes(task, from: "", to: "pinned draft")
+        #expect(
+            pinnedCommitted == false,
+            "a stale-baseline commit is refused so concurrent editors cannot silently overwrite each other"
+        )
+        #expect(
+            try #require(model.store.activeTasks.first).notes == "main draft",
+            "the committed text survives the refused commit"
+        )
+        #expect(model.lastErrorMessage != nil, "the conflict is reported like any refused save")
+
+        // The pinned editor re-anchors its baseline to the store (what the
+        // vetoed close does) and closes again: the deliberate second close
+        // wins.
+        let retryCommitted = model.setNotes(task, from: "main draft", to: "pinned draft")
+        #expect(retryCommitted)
+        #expect(try #require(model.store.activeTasks.first).notes == "pinned draft")
     }
 }
 

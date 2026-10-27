@@ -21,7 +21,7 @@ struct TaskNotesTests {
         var store = TaskStore(tasks: [task])
         let payload = "Read https://example.com/spec first\n  spacing survives untrimmed"
 
-        try store.updateNotes(id: task.id, to: payload, now: t1)
+        try store.updateNotes(id: task.id, from: task.notes, to: payload, now: t1)
 
         let updated = try #require(store.tasks.first)
         #expect(updated.notes == payload, "notes are stored verbatim, including whitespace and newlines")
@@ -35,7 +35,7 @@ struct TaskNotesTests {
         var store = TaskStore(tasks: [task])
         let before = store
 
-        try store.updateNotes(id: task.id, to: "same text", now: t1)
+        try store.updateNotes(id: task.id, from: task.notes, to: "same text", now: t1)
 
         #expect(store == before, "rewriting identical notes is a no-op: no reorder, no timestamp churn")
     }
@@ -45,7 +45,7 @@ struct TaskNotesTests {
         task.notes = "temporary"
         var store = TaskStore(tasks: [task])
 
-        try store.updateNotes(id: task.id, to: "", now: t1)
+        try store.updateNotes(id: task.id, from: task.notes, to: "", now: t1)
 
         let updated = try #require(store.tasks.first)
         #expect(updated.notes == "", "empty notes are valid (clearing)")
@@ -61,7 +61,7 @@ struct TaskNotesTests {
         #expect(try #require(store.tasks.first).isArchived)
 
         #expect(throws: TaskStoreError.archivedTasksAreImmutable) {
-            try store.updateNotes(id: task.id, to: "late note", now: t1)
+            try store.updateNotes(id: task.id, from: task.notes, to: "late note", now: t1)
         }
         #expect(try #require(store.tasks.first).notes == task.notes)
     }
@@ -70,7 +70,7 @@ struct TaskNotesTests {
         var store = TaskStore()
         let unknown = UUID()
         #expect(throws: TaskStoreError.taskNotFound(id: unknown)) {
-            try store.updateNotes(id: unknown, to: "orphan", now: t0)
+            try store.updateNotes(id: unknown, from: "", to: "orphan", now: t0)
         }
     }
 
@@ -80,12 +80,53 @@ struct TaskNotesTests {
         task.isPinned = true
         var store = TaskStore(tasks: [task])
 
-        try store.updateNotes(id: task.id, to: "note text", now: t1)
+        try store.updateNotes(id: task.id, from: task.notes, to: "note text", now: t1)
 
         let updated = try #require(store.tasks.first)
         #expect(updated.status == .doing)
         #expect(updated.isPinned)
         #expect(updated.completedAt == nil)
         #expect(updated.archivedAt == nil)
+    }
+
+    @Test func staleBaselineNotesEditThrowsConflictInsteadOfOverwriting() throws {
+        var task = TaskItem.make(title: "contested", now: t0)
+        task.notes = "base"
+        var store = TaskStore(tasks: [task])
+
+        // A concurrent editor commits between this editor's open (baseline
+        // "base") and its close, moving the stored notes elsewhere.
+        try store.updateNotes(id: task.id, from: "base", to: "changed elsewhere", now: t0.addingTimeInterval(60))
+
+        #expect(throws: TaskStoreError.notesModifiedElsewhere(id: task.id)) {
+            try store.updateNotes(id: task.id, from: "base", to: "stale draft", now: t1)
+        }
+        #expect(
+            try #require(store.tasks.first).notes == "changed elsewhere",
+            "the stale commit does not overwrite the concurrent editor's text"
+        )
+
+        // The vetoed editor re-reads the store (the UI's retry path); the
+        // deliberate second close then wins.
+        try store.updateNotes(id: task.id, from: "changed elsewhere", to: "stale draft", now: t1)
+        #expect(try #require(store.tasks.first).notes == "stale draft")
+    }
+
+    @Test func committingTextThatAlreadyMatchesTheStoreNeverConflicts() throws {
+        var task = TaskItem.make(title: "converged", now: t0)
+        task.notes = ""
+        var store = TaskStore(tasks: [task])
+
+        // A concurrent editor commits while this editor's draft ("same
+        // result") sits open, and happens to store exactly the same text.
+        try store.updateNotes(id: task.id, from: "", to: "same result", now: t0.addingTimeInterval(60))
+
+        let before = store
+        try store.updateNotes(id: task.id, from: "", to: "same result", now: t1)
+
+        #expect(
+            store == before,
+            "committing text that already equals the stored notes is a no-op, never a conflict"
+        )
     }
 }

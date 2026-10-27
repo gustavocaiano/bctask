@@ -22,10 +22,14 @@ public enum TaskStatus: String, Codable, CaseIterable, Hashable, Sendable {
 /// - `notes` is free-form detail text (a description, links, anything the user
 ///   wants to keep with the task). It is stored verbatim and only ever edited
 ///   through `TaskStore.updateNotes`; empty string means "no notes".
-/// - Backward compatibility: the JSON schema stays 1. Older documents have no
-///   `"notes"` key and decode with `notes == ""` (custom `init(from:)` uses
-///   `decodeIfPresent`); older app binaries simply ignore the extra key when
-///   reading newer documents, so no migration is needed in either direction.
+/// - On-disk compatibility: writes use document schema 2 (see
+///   `TaskDocument`). Reading spans schemas 1 and 2: legacy documents have
+///   no `"notes"` key and decode with `notes == ""` (custom `init(from:)`
+///   uses `decodeIfPresent`), including schema-1 files that interim builds
+///   already wrote with notes. Older BCTask builds reject schema 2 outright
+///   instead of decoding the file and later re-encoding it without the
+///   notes key — that downgrade path is exactly what the version bump
+///   exists to prevent.
 public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     public let id: UUID
     public var title: String
@@ -76,7 +80,7 @@ public struct TaskItem: Identifiable, Hashable, Codable, Sendable {
     /// Decodes with backward compatibility: documents persisted before `notes`
     /// existed carry no `"notes"` key and must decode as empty notes rather
     /// than fail. Encoding stays compiler-synthesized and always writes the
-    /// field (schema 1 tolerates the extra key in both directions).
+    /// field, at document schema 2 (see `TaskDocument`).
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id = try container.decode(UUID.self, forKey: .id)

@@ -12,6 +12,12 @@ struct PinnedTaskCardView: View {
     /// so the draft can live right here instead of in a shared surface.
     @State private var isEditingNotes = false
     @State private var notesDraft = ""
+    /// Stored notes at editor-open time: the optimistic-concurrency baseline
+    /// every commit carries. The main surface can open an editor for the same
+    /// task while this one is open; a close whose baseline no longer matches
+    /// the store is refused (error banner) instead of silently overwriting
+    /// the other editor's text, and the deliberate second close wins.
+    @State private var notesEditingBaseline = ""
 
     var body: some View {
         ZStack {
@@ -20,7 +26,14 @@ struct PinnedTaskCardView: View {
             if let storageError = model.storageError {
                 storageLockedState(storageError)
             } else if let task = model.activeTasks.first(where: { $0.id == taskID }) {
+                // Commit the open draft while its state is still readable:
+                // this subtree disappears on panel teardown (unpin, a
+                // status move that drops the pin, archive sweep, app stop)
+                // as well as in-card state swaps (storage lock, task
+                // unavailable) — every one of those would otherwise strand
+                // the draft in dying view state.
                 taskCard(task)
+                    .onDisappear { commitOpenPinnedNotes() }
             } else {
                 unavailableState
             }
@@ -68,6 +81,10 @@ struct PinnedTaskCardView: View {
                     toggleNotesEditing(for: task)
                 }
                 TaskPinButton(isPinned: task.isPinned) {
+                    // From a live panel this only unpins (reconciliation
+                    // strips panels of unpinned tasks), which tears the
+                    // panel down: the open draft must not die with it.
+                    commitOpenPinnedNotes()
                     model.setPinned(task, !task.isPinned)
                 }
             }
@@ -117,7 +134,14 @@ struct PinnedTaskCardView: View {
                     task: task,
                     availableTargets: model.availableTargets(for: task),
                     compact: false,
-                    onSelect: { model.setStatus(task, to: $0) }
+                    onSelect: { target in
+                        // Todo/Done moves drop the pin, and store
+                        // reconciliation then tears this panel down: commit
+                        // the open draft first so it survives its own status
+                        // change. Doing keeps the pin (and panel) alive.
+                        if target != .doing { commitOpenPinnedNotes() }
+                        model.setStatus(task, to: target)
+                    }
                 )
             }
 
@@ -149,25 +173,57 @@ struct PinnedTaskCardView: View {
             return
         }
         notesDraft = task.notes
+        notesEditingBaseline = task.notes
         isEditingNotes = true
     }
 
     /// The single commit point: disk-first `setNotes`, once, on close only.
-    /// Returns false when the save was refused or failed, leaving the editor
-    /// open with its draft — the user's only copy of the text.
+    /// Returns false when the save was refused, failed, or conflicted with a
+    /// concurrent editor (the main surface's editor for the same task),
+    /// leaving the editor open with its draft — the user's only copy of the
+    /// text.
     @discardableResult
     private func closeNotesEditor(committing text: String, for task: TaskItem) -> Bool {
         guard isEditingNotes else { return true }
         let notes = TaskNotes.trimmed(text)
-        guard notes != task.notes else {
-            isEditingNotes = false
-            notesDraft = ""
+        guard notes != notesEditingBaseline else {
+            collapseNotesEditor()
             return true
         }
-        guard model.setNotes(task, notes) else { return false }
+        guard model.setNotes(task, from: notesEditingBaseline, to: notes) else {
+            // Re-anchor the baseline to the store so the deliberate retry
+            // (a second close) overwrites on purpose instead of conflicting
+            // forever; the error banner already reports why the first
+            // close was refused.
+            notesEditingBaseline = currentStoredNotes
+            return false
+        }
+        collapseNotesEditor()
+        return true
+    }
+
+    private func collapseNotesEditor() {
         isEditingNotes = false
         notesDraft = ""
-        return true
+        notesEditingBaseline = ""
+    }
+
+    /// Stored notes for this card's task right now: the freshness anchor a
+    /// vetoed commit re-reads so its deliberate retry can succeed.
+    private var currentStoredNotes: String {
+        model.store.tasks.first(where: { $0.id == taskID })?.notes ?? ""
+    }
+
+    /// Commits the open draft before this card's content goes away: panel
+    /// teardown (unpin, a status move that drops the pin, archive sweep,
+    /// app stop) and in-card state swaps (storage lock, task unavailable)
+    /// all detach this subtree, and the draft lives nowhere else. Archived
+    /// or deleted tasks fold silently — the commit would be refused anyway.
+    private func commitOpenPinnedNotes() {
+        guard isEditingNotes,
+              let task = model.activeTasks.first(where: { $0.id == taskID })
+        else { return }
+        _ = closeNotesEditor(committing: notesDraft, for: task)
     }
 
     private var unavailableState: some View {

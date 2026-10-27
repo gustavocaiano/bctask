@@ -16,7 +16,7 @@ always-on-top floating panel.
 
 ## Build and test
 
-- `scripts/test.sh` — canonical test runner (131 Swift Testing tests). Bare
+- `scripts/test.sh` — canonical test runner (136 Swift Testing tests). Bare
   `swift test` silently discovers zero tests on CLT-only machines because the
   Swift Testing framework lives outside the SDK; the script derives the needed
   framework/plugin paths from the active developer directory, passes them to
@@ -126,8 +126,14 @@ distributably signed artifact.
   glanced at. Editing notes bumps the task to the top of the list, like any
   other change. Archived tasks are immutable, so their notes stay read-only
   (restoring the task makes them editable again). Notes persist in the task
-  file alongside everything else; older BCTask data loads with empty notes
-  and older app builds simply ignore the new field.
+  file at document schema 2. Data from older builds still loads — pre-notes
+  files come up with empty notes — and the first change rewrites the file at
+  the new version. An older app build refuses a schema-2 file outright
+  (its locked state) instead of re-saving it without the notes key and
+  silently deleting every note. Concurrent editors are guarded too: the
+  main surface and a pinned panel can both edit one task's notes, and a
+  close whose stored text has moved underneath it is refused with an error
+  — the editor stays open, and closing it again overwrites deliberately.
 
 ### Keyboard shortcuts (while the main surface is key)
 
