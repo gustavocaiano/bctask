@@ -4,10 +4,18 @@ import BCTaskCore
 import Combine
 
 
-/// One retained panel + hosting controller pair for a live pinned task.
+/// One retained card panel + hosting controller pair for a live pinned task
+/// whose ticker the user clicked; it lives, shown or hidden, until the pin
+/// retires.
 private struct PinnedPanelEntry {
     let panel: NSPanel
     let content: NSHostingController<PinnedTaskCardView>
+}
+
+/// One fixed-width menu-bar ticker for a live pinned task.
+private struct PinnedTickerEntry {
+    let item: NSStatusItem
+    let label: MarqueeLabelView
 }
 
 /// Minimal thread-safe counter for observer-delivery test seams.
@@ -27,14 +35,15 @@ private final class ThreadSafeCounter: @unchecked Sendable {
 /// - Hosts the accepted SwiftUI surface exactly once through a retained
 ///   `NSHostingController`; hiding/showing never re-creates the SwiftUI root,
 ///   so draft text, projection, and focused-task state survive toggles.
-/// - Reconciles ONE floating `NSPanel` per live pinned task (`isPinned ==
-///   true`, `archivedAt == nil`) with the observed store AND storage-lock
-///   state, so pin, unpin, archive, restore, reload, launch, and lock
-///   recovery paths all converge without one-shot plumbing and without
-///   feedback loops or duplicate mutations. User closing is model-first:
-///   a successful durable unpin lets the observed state strip the panel
-///   (ordered out and closed, hosted content detached); refusal (save
-///   failure or storage lock) keeps the panel and pin coherent.
+/// - Reconciles ONE fixed-width menu-bar ticker per live pinned task
+///   (`isPinned == true`, `archivedAt == nil`) with the observed store, so
+///   pin, unpin, archive, restore, reload, launch, and lock recovery paths
+///   all converge without one-shot plumbing. A ticker shows the task title,
+///   scrolling when it does not fit. Clicking a ticker shows or hides that
+///   task's floating card below it; closing a card only hides it, and the
+///   controller never mutates the model for either. Retiring a pin strips
+///   its card (ordered out and closed, hosted content detached) along with
+///   its ticker.
 /// - Translates only the accepted native shortcuts into the retained
 ///   `TaskCommandRouter` while the main panel is key.
 /// - Runs the archival catch-up sweep on a restrained interval, on app
@@ -45,18 +54,15 @@ private final class ThreadSafeCounter: @unchecked Sendable {
 final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelegate {
     /// Stable frame-autosave name for the main panel.
     static let mainFrameAutosaveName = "BCTaskMainMenuPanel"
-    /// Prefix for stable, task-specific frame-autosave names of pinned panels.
-    static let pinnedFrameAutosavePrefix = "BCTaskPinnedPanel-"
-    /// Last user-positioned pinned panel, used as the bootstrap placement for
-    /// a newly pinned task when no floating cards are currently open.
-    static let pinnedPanelPlacementAnchorDefaultsKey = "BCTaskPinnedPanelPlacementAnchor"
 
+    /// Fixed menu-bar width of each pinned task's ticker.
+    static let pinnedTickerWidth = CGFloat(160)
     /// Mirrors `PinnedTaskCardView`'s accepted sizing contract.
     static let pinnedPanelMinimumSize = CGSize(width: 300, height: 210)
     static let pinnedPanelIdealSize = CGSize(width: 320, height: 230)
     static let pinnedPanelMaxWidth = CGFloat(360)
-    /// The stagger between cards in a pinned-panel cascade.
-    static let pinnedPanelCascadeOffset = CGFloat(24)
+    /// Space between the menu bar and a card dropped below its ticker.
+    static let pinnedCardGap = CGFloat(6)
 
     /// Restrained catch-up cadence while the app is running.
     private static let catchUpInterval: TimeInterval = 45
@@ -69,10 +75,10 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
     /// Retained so the SwiftUI root is created exactly once and survives toggles.
     private var mainContentController: NSHostingController<AppMenuSurfaceView>?
     private var mainPanel: NSPanel?
-    /// One retained floating panel per live pinned task id; no duplicates.
+    /// One menu-bar ticker per live pinned task id; no duplicates.
+    private var pinnedTickers: [UUID: PinnedTickerEntry] = [:]
+    /// Floating cards opened from their tickers (showing or hidden), by task id.
     private var pinnedPanels: [UUID: PinnedPanelEntry] = [:]
-    /// Cascade offset for newly created (unsaved-frame) pinned panels.
-    private var pinnedCascadeIndex = 0
 
     private var keyMonitor: Any?
     private var catchUpTimer: Timer?
@@ -102,7 +108,7 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
 
     /// Installs every app-lifetime seam: status item, key monitor, catch-up
     /// timer and observers, and the store observation that reconciles pinned
-    /// panels (this immediate first observation restores persisted pins).
+    /// tickers (this immediate first observation restores persisted pins).
     /// Idempotent: a repeated start while running is a no-op so no seam can
     /// ever be installed twice; `stop()` clears the gate, so start after
     /// stop reinstalls everything.
@@ -118,8 +124,8 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
     }
 
     /// Removes every installed seam: monitor, timer, observers, store
-    /// subscription, and on-screen panels. This is terminal lifecycle
-    /// teardown: pinned panels and the main surface are closed and stripped
+    /// subscription, pinned tickers, and on-screen panels. This is terminal
+    /// lifecycle teardown: pinned cards and the main surface are closed and stripped
     /// (not merely hidden); because AppKit-safe programmatic release keeps
     /// `isReleasedWhenClosed = false`, closed panels can remain registered
     /// as empty shells in `NSApp.windows`; persisted frames
@@ -148,6 +154,9 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         storeSubscription = nil
         for id in Array(pinnedPanels.keys) {
             destroyAndReleasePinnedPanel(id)
+        }
+        for id in Array(pinnedTickers.keys) {
+            removePinnedTicker(id)
         }
         if let mainPanel {
             // Terminal lifecycle teardown: close and strip the retained
@@ -389,58 +398,101 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         model.sweepAndPersist()
     }
 
-    // MARK: - Pinned panel reconciliation
+    // MARK: - Pinned tickers and cards
 
-    /// Desired pinned panel set: every live task flagged pinned.
+    /// Desired ticker set: every live task flagged pinned.
     /// Archived tasks are never pinned (`sweep` unpins them), but the filter
     /// below also defends against external data drift.
-    static func desiredPinnedPanelIDs(in store: TaskStore) -> Set<UUID> {
+    static func desiredPinnedTaskIDs(in store: TaskStore) -> Set<UUID> {
         Set(store.tasks.filter { $0.isPinned && !$0.isArchived }.map(\.id))
     }
 
-    /// Subscribes to the observed store AND lock state so every publication
-    /// of either (launch, mutation, sweep, reload success/failure, recovery)
-    /// reconciles pinned panels. Internal so focused tests exercise the same
-    /// observation path without a real status item. Cancels any previous
-    /// subscription first, so repeated installation stays safe.
+    /// Subscribes to the observed store so every publication (launch,
+    /// mutation, sweep, reload, recovery) reconciles pinned tickers and
+    /// cards. Internal so focused tests exercise the same observation path
+    /// without the app's own status item. Cancels any previous subscription
+    /// first, so repeated installation stays safe.
     func installStoreObservation() {
         storeSubscription?.cancel()
-        storeSubscription = model.$store.combineLatest(model.$storageError).sink { [weak self] store, storageError in
-            self?.reconcilePinnedPanels(with: store, canMutate: storageError == nil)
+        storeSubscription = model.$store.sink { [weak self] store in
+            self?.reconcilePinnedTasks(with: store)
         }
     }
 
-    /// Converges the retained pinned-panel dictionary to the desired set.
-    /// Removals always run (stale desired panels may be removed while
-    /// locked); creations only run while mutation is unlocked. Removals strip
-    /// and programmatically close panels with delegates detached, so the
-    /// model-first user-close path remains the only path that mutates the model.
-    func reconcilePinnedPanels(with store: TaskStore, canMutate: Bool) {
-        let desired = Self.desiredPinnedPanelIDs(in: store)
-        let stale = pinnedPanels.keys.filter { !desired.contains($0) }
-        for id in stale {
-            closePinnedPanel(id)
+    /// Converges tickers to the live pinned tasks of `store`: retired pins
+    /// lose their ticker and any open card, new pins get a ticker but never a
+    /// card (cards open only from a ticker click), and titles follow the
+    /// store. Storage lock needs no gate: a locked store cannot change, and an
+    /// open card shows its own locked state with Reload.
+    func reconcilePinnedTasks(with store: TaskStore) {
+        let desired = Self.desiredPinnedTaskIDs(in: store)
+        for id in pinnedPanels.keys.filter({ !desired.contains($0) }) {
+            destroyAndReleasePinnedPanel(id)
         }
-        // While storage is locked the displayed snapshot keeps pinned tasks,
-        // but mutations (including closing-panel unpin) are refused; do not
-        // re-open panels closed by the user during a lock.
-        guard canMutate else { return }
-        for id in desired.subtracting(pinnedPanels.keys) {
-            createPinnedPanel(id)
+        for id in pinnedTickers.keys.filter({ !desired.contains($0) }) {
+            removePinnedTicker(id)
+        }
+        // Store order keeps ticker creation deterministic.
+        for task in store.tasks where desired.contains(task.id) && pinnedTickers[task.id] == nil {
+            createPinnedTicker(task.id)
         }
         refreshTitles(with: store)
     }
 
     private func refreshTitles(with store: TaskStore) {
-        for (id, entry) in pinnedPanels {
-            if let task = store.tasks.first(where: { $0.id == id }) {
-                entry.panel.title = task.title
+        for task in store.tasks {
+            if let ticker = pinnedTickers[task.id] {
+                ticker.label.text = task.title
+                ticker.item.button?.toolTip = task.title
+                ticker.item.button?.setAccessibilityLabel(task.title)
             }
+            pinnedPanels[task.id]?.panel.title = task.title
         }
     }
 
-    private func createPinnedPanel(_ id: UUID) {
-        guard let task = model.store.tasks.first(where: { $0.id == id }) else { return }
+    private func createPinnedTicker(_ id: UUID) {
+        let item = NSStatusBar.system.statusItem(withLength: Self.pinnedTickerWidth)
+        let label = MarqueeLabelView(frame: item.button?.bounds ?? .zero)
+        if let button = item.button {
+            button.title = ""
+            button.image = nil
+            label.autoresizingMask = [.width, .height]
+            button.addSubview(label)
+            button.setAccessibilityHelp("Show or hide this task's card")
+            button.target = self
+            button.action = #selector(pinnedTickerClicked(_:))
+        }
+        pinnedTickers[id] = PinnedTickerEntry(item: item, label: label)
+    }
+
+    private func removePinnedTicker(_ id: UUID) {
+        guard let entry = pinnedTickers.removeValue(forKey: id) else { return }
+        NSStatusBar.system.removeStatusItem(entry.item)
+    }
+
+    @objc private func pinnedTickerClicked(_ sender: NSStatusBarButton) {
+        guard let id = pinnedTickers.first(where: { $0.value.item.button === sender })?.key else { return }
+        togglePinnedCard(id)
+    }
+
+    /// Ticker click: shows the task's floating card just below its ticker, or
+    /// hides it when it is showing. Hiding only orders the card out and never
+    /// tears its hosted content down, so an open notes draft is never
+    /// dropped. The controller mutates nothing here; the ticker stays until
+    /// the pin itself goes away.
+    func togglePinnedCard(_ id: UUID) {
+        guard let ticker = pinnedTickers[id] else { return }
+        if let card = pinnedPanels[id]?.panel, card.isVisible {
+            card.orderOut(nil)
+            return
+        }
+        guard let card = pinnedPanels[id]?.panel ?? makePinnedCard(id) else { return }
+        placePinnedCard(card, below: ticker)
+        card.orderFrontRegardless() // visible without activating the app
+    }
+
+    private func makePinnedCard(_ id: UUID) -> NSPanel? {
+        guard let task = model.store.tasks.first(where: { $0.id == id }) else { return nil }
         let content = NSHostingController(rootView: PinnedTaskCardView(model: model, taskID: id))
         let panel = NSPanel(
             contentRect: NSRect(origin: .zero, size: Self.pinnedPanelIdealSize),
@@ -456,86 +508,41 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.becomesKeyOnlyIfNeeded = false // cards stay fully usable
-        // The accepted PinnedTaskCardView sizing contract, enforced BEFORE any
-        // frame restoration so a restored frame is already inside bounds.
+        // The accepted PinnedTaskCardView sizing contract.
         panel.contentMinSize = NSSize(width: Self.pinnedPanelMinimumSize.width, height: Self.pinnedPanelMinimumSize.height)
         panel.contentMaxSize = NSSize(width: Self.pinnedPanelMaxWidth, height: .greatestFiniteMagnitude)
-        let screens = NSScreen.screens.map { (frame: $0.frame, visibleFrame: $0.visibleFrame) }
-        if let origin = Self.anchoredPinnedPanelOrigin(
-            existingFrames: pinnedPanels.values.map { $0.panel.frame },
-            savedAnchor: Self.pinnedPanelPlacementAnchor(),
-            panelSize: Self.pinnedPanelIdealSize,
-            screens: screens
-        ) {
-            panel.setFrameOrigin(origin)
-        } else if let screen = NSScreen.main {
-            // First run has neither open cards nor a user-positioned anchor,
-            // so retain the original top-right cascade as a safe bootstrap.
-            let visible = screen.visibleFrame
-            let shift = CGFloat(pinnedCascadeIndex) * Self.pinnedPanelCascadeOffset
-            pinnedCascadeIndex += 1
-            panel.setFrameOrigin(
-                NSPoint(
-                    x: visible.maxX - Self.pinnedPanelIdealSize.width - 32 - shift,
-                    y: visible.maxY - Self.pinnedPanelIdealSize.height - 96 - shift
-                )
-            )
-        }
-        // Stable, task-specific autosave name; restores the persisted frame
-        // when one exists, otherwise the cascade origin above is kept.
-        panel.setFrameAutosaveName(Self.pinnedFrameAutosavePrefix + id.uuidString)
-        clampPinnedContent(panel)
         panel.delegate = self
-        panel.orderFrontRegardless() // visible without activating the app
         pinnedPanels[id] = PinnedPanelEntry(panel: panel, content: content)
+        return panel
     }
 
-    /// Selects an on-screen staggered origin for an unsaved pinned card.
-    /// Existing cards take precedence so newly pinned tasks join the visible
-    /// cluster; when none are open, the most recently user-moved card supplies
-    /// the same-screen approximation across launches. `nil` leaves the caller
-    /// to use its first-run fallback.
-    static func anchoredPinnedPanelOrigin(
-        existingFrames: [NSRect],
-        savedAnchor: NSRect?,
-        panelSize: CGSize,
-        screens: [(frame: NSRect, visibleFrame: NSRect)]
-    ) -> NSPoint? {
-        let liveAnchor = existingFrames.max { lhs, rhs in
-            if lhs.maxY != rhs.maxY { return lhs.maxY < rhs.maxY }
-            return lhs.maxX < rhs.maxX
+    /// Every show drops the card below its ticker, wherever it was dragged
+    /// to last time.
+    private func placePinnedCard(_ panel: NSPanel, below ticker: PinnedTickerEntry) {
+        guard let button = ticker.item.button,
+              let tickerWindow = button.window,
+              let screen = tickerWindow.screen ?? NSScreen.main
+        else {
+            panel.center() // no on-screen ticker to hang from
+            return
         }
-        guard let anchor = liveAnchor ?? savedAnchor else { return nil }
-        let anchorCenter = NSPoint(x: anchor.midX, y: anchor.midY)
-        guard let screen = screens.first(where: { $0.frame.contains(anchorCenter) })
-            ?? screens.first(where: { $0.frame.intersects(anchor) })
-        else { return nil }
+        let tickerFrame = tickerWindow.convertToScreen(button.convert(button.bounds, to: nil))
+        panel.setFrameOrigin(
+            Self.pinnedCardOrigin(below: tickerFrame, panelSize: panel.frame.size, visibleFrame: screen.visibleFrame)
+        )
+    }
 
-        let firstOrigin = Self.clampedPinnedPanelOrigin(
+    /// Drops a card just below its ticker, centered on it, inside the usable
+    /// part of the ticker's screen.
+    static func pinnedCardOrigin(below ticker: NSRect, panelSize: CGSize, visibleFrame: NSRect) -> NSPoint {
+        clampedPinnedPanelOrigin(
             NSPoint(
-                x: anchor.minX - Self.pinnedPanelCascadeOffset,
-                y: anchor.minY - Self.pinnedPanelCascadeOffset
+                x: ticker.midX - panelSize.width / 2,
+                y: ticker.minY - pinnedCardGap - panelSize.height
             ),
             panelSize: panelSize,
-            visibleFrame: screen.visibleFrame
+            visibleFrame: visibleFrame
         )
-
-        // Match the original down-left cascade while walking past overlapping
-        // cards, so a newly pinned task extends the cluster instead of covering
-        // its most recent neighbour.
-        for step in 1...16 {
-            let shift = CGFloat(step) * Self.pinnedPanelCascadeOffset
-            let origin = Self.clampedPinnedPanelOrigin(
-                NSPoint(x: anchor.minX - shift, y: anchor.minY - shift),
-                panelSize: panelSize,
-                visibleFrame: screen.visibleFrame
-            )
-            let candidate = NSRect(origin: origin, size: panelSize)
-            if !existingFrames.contains(where: { $0.intersects(candidate) }) {
-                return origin
-            }
-        }
-        return firstOrigin
     }
 
     /// Clamps a new panel's origin to the usable part of its selected screen.
@@ -552,37 +559,15 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         )
     }
 
-    /// Reads a user-positioned card frame saved by `windowDidMove(_:)`.
-    static func pinnedPanelPlacementAnchor(defaults: UserDefaults = .standard) -> NSRect? {
-        guard let stored = defaults.string(forKey: pinnedPanelPlacementAnchorDefaultsKey) else { return nil }
-        let frame = NSRectFromString(stored)
-        guard frame.width > 0, frame.height > 0 else { return nil }
-        return frame
-    }
-
-    /// Persists the most recent user placement without coupling it to a task's
-    /// own autosaved frame, which still wins when that exact task is re-pinned.
-    static func savePinnedPanelPlacementAnchor(_ frame: NSRect, defaults: UserDefaults = .standard) {
-        defaults.set(NSStringFromRect(frame), forKey: pinnedPanelPlacementAnchorDefaultsKey)
-    }
-
-    /// Destroys a tracked pinned panel. Called from reconciliation (no model
-    /// mutation needed — the change is already in the store) and from
-    /// `stop()` teardown; delegates to `destroyAndReleasePinnedPanel(_:)`
-    /// for deterministic release.
-    private func closePinnedPanel(_ id: UUID) {
-        destroyAndReleasePinnedPanel(id)
-    }
-
-    /// Programmatic destruction of a pinned panel: the delegate is detached
-    /// FIRST so neither `windowShouldClose` model mutations nor
-    /// `windowWillClose` cleanup can fire on this path, hosted content is
-    /// detached, the panel is ordered out when visible, and `close()`
-    /// completes the close (autosaved frame is persisted by AppKit, exactly
-    /// as with user closes). The last strong reference is dropped via
-    /// `pinnedPanels.removeValue`, so the window keeps no live content
-    /// instead of surviving teardown as a rooted resource. User close keeps
-    /// its model-first semantics; this helper never calls `model.setPinned`.
+    /// Programmatic destruction of a pinned card, shown or hidden, once its
+    /// pin retires (reconciliation: the change is already in the store) and
+    /// on `stop()` teardown: the delegate is detached FIRST so
+    /// `windowWillClose` cleanup cannot fire on this path, hosted content is
+    /// detached (its `onDisappear` commits an open notes draft), the panel is
+    /// ordered out when visible, and `close()` completes the close. The last
+    /// strong reference is dropped via `pinnedPanels.removeValue`, so the
+    /// window keeps no live content instead of surviving teardown as a rooted
+    /// resource. The helper itself never calls the model.
     private func destroyAndReleasePinnedPanel(_ id: UUID) {
         guard let entry = pinnedPanels.removeValue(forKey: id) else { return }
         let panel = entry.panel
@@ -601,53 +586,27 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         panel.close()
     }
 
-    /// Normalizes a restored (or default) pinned frame to the accepted
-    /// content constraints, preserving the window's top-left corner.
-    private func clampPinnedContent(_ panel: NSPanel) {
-        let content = panel.contentRect(forFrameRect: panel.frame)
-        var clamped = content.size
-        clamped.width = min(max(clamped.width, Self.pinnedPanelMinimumSize.width), Self.pinnedPanelMaxWidth)
-        clamped.height = max(clamped.height, Self.pinnedPanelMinimumSize.height)
-        guard clamped != content.size else { return }
-        // AppKit anchors setContentSize at the content's top-left corner.
-        panel.setContentSize(clamped)
-    }
-
-    /// NSWindowDelegate, model-first close semantics:
+    /// NSWindowDelegate close semantics:
     /// - Main panel: refuses native close and hides instead (never destroyed).
-    /// - Pinned panel: asks the model for the durable unpin FIRST. A successful
-    ///   publication lets the store/lock observation strip the panel
-    ///   (ordered out, closed, content detached); native close is prevented
-    ///   so AppKit cannot close the panel behind the controller. Save
-    ///   failure or a storage lock keeps
-    ///   the panel and its pin coherent (nothing closed, nothing overwritten).
-    /// - A panel without a live pinned task has nothing durable to change;
-    ///   native close proceeds and `windowWillClose` performs the
-    ///   mutation-free dictionary cleanup.
+    /// - Pinned card: refuses native close and hides instead, exactly like a
+    ///   second ticker click: the controller leaves the model alone, so the
+    ///   pin and its ticker stay, and the card's hosted content (with any open
+    ///   notes draft) is kept for the next show.
+    /// - Any other window closes natively.
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         if sender === mainPanel {
             hideMainPanel()
             return false
         }
-        guard let id = pinnedPanels.first(where: { $0.value.panel === sender })?.key,
-              let task = model.store.tasks.first(where: { $0.id == id }),
-              task.isPinned,
-              !task.isArchived
-        else {
+        guard pinnedPanels.values.contains(where: { $0.panel === sender }) else {
             return true
         }
-        guard model.canMutate else {
-            return false // locked: keep panel + pin coherent
-        }
-        model.setPinned(task, false) // failed save keeps displayed state pinned and disk unchanged
+        sender.orderOut(nil)
         return false
     }
 
-    /// Mutation-free defensive cleanup reserved for panels that legitimately
-    /// close without a durable change (i.e. the task was no longer pinned).
-    /// The previous willClose unpin mutation was removed: user close is
-    /// model-first via `windowShouldClose`, so this cannot double-unpin or
-    /// race the reconciliation.
+    /// Mutation-free defensive cleanup for a tracked card that closes by any
+    /// path other than `windowShouldClose`.
     func windowWillClose(_ notification: Notification) {
         guard let closing = notification.object as? NSWindow,
               let id = pinnedPanels.first(where: { $0.value.panel === closing })?.key
@@ -655,19 +614,11 @@ final class StatusItemPanelsController: NSObject, NSWindowDelegate, NSMenuDelega
         pinnedPanels.removeValue(forKey: id)
     }
 
-    /// Captures only user moves of already tracked cards. Creation and frame
-    /// restoration happen before a panel enters `pinnedPanels`, preventing an
-    /// automatic fallback placement from overwriting the user's preference.
-    func windowDidMove(_ notification: Notification) {
-        guard let moved = notification.object as? NSWindow,
-              pinnedPanels.values.contains(where: { $0.panel === moved })
-        else { return }
-        Self.savePinnedPanelPlacementAnchor(moved.frame)
-    }
-
     // MARK: - Test seams
 
-    var pinnedPanelIDsForTesting: Set<UUID> { Set(pinnedPanels.keys) }
+    var pinnedTickerIDsForTesting: Set<UUID> { Set(pinnedTickers.keys) }
+    func pinnedTickerForTesting(_ id: UUID) -> NSStatusItem? { pinnedTickers[id]?.item }
+    func pinnedTickerTextForTesting(_ id: UUID) -> String? { pinnedTickers[id]?.label.text }
     var pinnedPanelCountForTesting: Int { pinnedPanels.count }
     var mainPanelForTesting: NSPanel? { mainPanel }
     var mainContentControllerForTesting: NSHostingController<AppMenuSurfaceView>? { mainContentController }

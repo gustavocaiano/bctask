@@ -1,9 +1,10 @@
 import SwiftUI
 import BCTaskCore
 
-/// Phase 3 can host this view directly in an always-on-top `NSPanel`. It looks
-/// up the task by identity on every model update, so status changes and unpin
-/// actions stay live without copying task state into the panel layer.
+/// The card a pinned task's menu-bar ticker opens, hosted directly in an
+/// always-on-top `NSPanel`. It looks up the task by identity on every model
+/// update, so status changes and unpin actions stay live without copying task
+/// state into the panel layer.
 struct PinnedTaskCardView: View {
     @ObservedObject var model: AppModel
     let taskID: UUID
@@ -70,7 +71,7 @@ struct PinnedTaskCardView: View {
     private func taskCard(_ task: TaskItem) -> some View {
         VStack(alignment: .leading, spacing: 15) {
             HStack(spacing: 9) {
-                Label("Floating task", systemImage: "pin.fill")
+                Label("Pinned to menu bar", systemImage: "pin.fill")
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(BCTaskTheme.accent)
                 Spacer()

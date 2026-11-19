@@ -1104,7 +1104,7 @@ struct TaskPinButton: View {
     let action: () -> Void
 
     private var actionLabel: String {
-        isPinned ? "Stop keeping this task floating" : "Keep this task floating"
+        isPinned ? "Remove this task from the menu bar" : "Show this task in the menu bar"
     }
 
     var body: some View {
@@ -1115,7 +1115,7 @@ struct TaskPinButton: View {
         .help(actionLabel)
         .accessibilityLabel(actionLabel)
         .accessibilityValue(isPinned ? "On" : "Off")
-        .accessibilityHint(isPinned ? "Unpins this task." : "Pins this task for the floating task window.")
+        .accessibilityHint(isPinned ? "Unpins this task." : "Pins this task as a ticker in the menu bar.")
     }
 }
 
