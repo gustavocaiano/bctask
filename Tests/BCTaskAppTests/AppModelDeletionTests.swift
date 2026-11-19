@@ -6,7 +6,7 @@ import BCTaskCore
 /// Focused regression evidence for AppModel deletion:
 /// - `delete` persists durably and is gone for a fresh model on the same store,
 /// - a locked store refuses deletion without crashing or mutating,
-/// - deleting a pinned task removes it from the desired pinned-panel set.
+/// - deleting a pinned task removes it from the desired pinned-ticker set.
 @MainActor
 final class AppModelDeletionTests {
     private let t0: Date
@@ -79,18 +79,18 @@ final class AppModelDeletionTests {
                 "locked storage must never rewrite unreadable bytes")
     }
 
-    @Test func deletingPinnedTaskRemovesItFromDesiredPanelSet() throws {
+    @Test func deletingPinnedTaskRemovesItFromDesiredTickerSet() throws {
         let pinned = TaskItem(title: "pinned", createdAt: t0, updatedAt: t0, isPinned: true)
         let survivor = TaskItem(title: "survivor", createdAt: t0, updatedAt: t0, isPinned: true)
         try fileStore.save(TaskStore(tasks: [pinned, survivor]))
         let model = modelWithStorage()
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: model.store) == [pinned.id, survivor.id])
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: model.store) == [pinned.id, survivor.id])
 
         model.delete(pinned)
 
         #expect(model.store.tasks.contains(where: { $0.id == pinned.id }) == false)
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: model.store) == [survivor.id],
-                "deleting a pinned task closes its floating panel via reconciliation")
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: model.store) == [survivor.id],
+                "deleting a pinned task removes its menu-bar ticker via reconciliation")
     }
 }
 

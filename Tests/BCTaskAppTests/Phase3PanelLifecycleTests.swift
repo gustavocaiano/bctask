@@ -8,10 +8,11 @@ import BCTaskCore
 /// Phase 3 focused evidence:
 /// - the pure shortcut translator only recognizes the accepted native
 ///   shortcuts and rejects everything else deterministically,
-/// - pinned panel reconciliation converges to exactly one retained panel per
-///   live pinned task across launch restore, pin/unpin, archival catch-up,
+/// - pinned reconciliation converges to exactly one menu-bar ticker per live
+///   pinned task across launch restore, pin/unpin, archival catch-up, lock,
 ///   and external state reload — without duplicate ids or feedback loops,
-/// - closing a pinned panel routes through the existing model mutation,
+/// - a ticker toggles its task's floating card, and hiding or closing the
+///   card never touches the model,
 /// - the retained main surface keeps one hosted SwiftUI root across toggles,
 /// - controller start/stop install and remove the lifecycle seams.
 private final class Phase3Clock: @unchecked Sendable {
@@ -258,7 +259,7 @@ final class Phase3PanelLifecycleTests {
 
     // MARK: - Desired set (pure seam)
 
-    @Test func desiredPanelIDsFilterArchivedAndUnpinnedTasks() {
+    @Test func desiredTickerIDsFilterArchivedAndUnpinnedTasks() {
         let pinnedActiveTask = TaskItem(title: "active", createdAt: t0, updatedAt: t0, isPinned: true)
         let regular = TaskItem(title: "plain", createdAt: t0, updatedAt: t0)
         let pinnedDone = TaskItem(title: "done", status: .done, createdAt: t0, updatedAt: t0, completedAt: t0, isPinned: true)
@@ -266,55 +267,115 @@ final class Phase3PanelLifecycleTests {
         let archivedPinned = TaskItem(title: "archived", status: .done, createdAt: t0, updatedAt: t0, completedAt: t0, archivedAt: t0, isPinned: true)
         let store = TaskStore(tasks: [pinnedActiveTask, regular, pinnedDone, archivedPinned])
 
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: store) == [pinnedActiveTask.id, pinnedDone.id])
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: TaskStore(tasks: [])).isEmpty)
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: store) == [pinnedActiveTask.id, pinnedDone.id])
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: TaskStore(tasks: [])).isEmpty)
     }
 
     // MARK: - Launch restoration and no-duplicate reconciliation
 
-    @Test func launchRestoresExactlyOnePanelPerPersistedPin() throws {
+    @Test func launchRestoresOneTickerPerPersistedPinWithoutOpeningCards() throws {
         let task = pinnedActive()
         try seedDisk(with: TaskStore(tasks: [task]))
         let (controller, _) = try makeController(with: TaskStore(tasks: [task]))
 
         controller.installStoreObservation() // immediate publish restores persisted pins
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        let firstPanel = try #require(controller.pinnedPanelForTesting(task.id))
-        #expect(firstPanel.isFloatingPanel == true)
-        #expect(firstPanel.collectionBehavior.contains(.canJoinAllSpaces))
-        #expect(firstPanel.collectionBehavior.contains(.fullScreenAuxiliary))
-        #expect(firstPanel.frameAutosaveName == StatusItemPanelsController.pinnedFrameAutosavePrefix + task.id.uuidString)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        let ticker = try #require(controller.pinnedTickerForTesting(task.id))
+        #expect(ticker.length == StatusItemPanelsController.pinnedTickerWidth)
+        #expect(controller.pinnedTickerTextForTesting(task.id) == task.title)
+        #expect(controller.pinnedPanelCountForTesting == 0, "a pin no longer opens a floating card by itself")
 
-        // Reconciliation idempotence: repeated publishes never duplicate
-        // panels or rebuild content.
-        controller.reconcilePinnedPanels(with: TaskStore(tasks: [task]), canMutate: true)
-        controller.reconcilePinnedPanels(with: TaskStore(tasks: [task]), canMutate: true)
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        #expect(controller.pinnedPanelForTesting(task.id) === firstPanel)
+        // Reconciliation idempotence: repeated publishes never duplicate or
+        // rebuild tickers.
+        controller.reconcilePinnedTasks(with: TaskStore(tasks: [task]))
+        controller.reconcilePinnedTasks(with: TaskStore(tasks: [task]))
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        #expect(controller.pinnedTickerForTesting(task.id) === ticker)
 
         controller.stop()
-        #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
     }
 
-    // MARK: - Unpin from the main surface
+    // MARK: - The ticker toggles its card; the card never touches the pin
 
-    @Test func unpinFromObservedStoreRemovesPanelAndPersists() throws {
+    @Test func tickerTogglesItsCardWithoutTouchingThePin() throws {
         let task = pinnedActive()
         try seedDisk(with: TaskStore(tasks: [task]))
         let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
         controller.installStoreObservation()
+
+        controller.togglePinnedCard(task.id) // ticker click
+        let card = try #require(controller.pinnedPanelForTesting(task.id))
+        #expect(card.isVisible)
+        #expect(card.isFloatingPanel == true)
+        #expect(card.collectionBehavior.contains(.canJoinAllSpaces))
+        #expect(card.collectionBehavior.contains(.fullScreenAuxiliary))
+        #expect(card.title == task.title)
+        #expect(card.contentMinSize == NSSize(width: StatusItemPanelsController.pinnedPanelMinimumSize.width, height: StatusItemPanelsController.pinnedPanelMinimumSize.height))
+        #expect(card.contentMaxSize.width == StatusItemPanelsController.pinnedPanelMaxWidth)
+
+        controller.togglePinnedCard(task.id) // second click hides it
+        #expect(card.isVisible == false)
+        #expect(controller.pinnedPanelForTesting(task.id) === card)
+        #expect(card.contentViewController != nil, "a hidden card keeps its hosted content for the next show")
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        #expect(model.store.tasks.first?.isPinned == true)
+        #expect(try readDisk().tasks.first?.isPinned == true)
+
+        controller.togglePinnedCard(task.id) // third click shows the same card again
+        #expect(card.isVisible)
         #expect(controller.pinnedPanelCountForTesting == 1)
+        controller.stop()
+    }
+
+    @Test func closingTheCardHidesItAndKeepsThePinAndTicker() throws {
+        let task = pinnedActive()
+        try seedDisk(with: TaskStore(tasks: [task]))
+        let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
+        controller.installStoreObservation()
+        controller.togglePinnedCard(task.id)
+        let card = try #require(controller.pinnedPanelForTesting(task.id))
+
+        // performClose simulates the close button: it consults
+        // windowShouldClose, which only hides the card, with no model write.
+        card.performClose(nil)
+
+        #expect(card.isVisible == false)
+        #expect(controller.pinnedPanelForTesting(task.id) === card)
+        #expect(card.contentViewController != nil)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        #expect(model.store.tasks.first?.isPinned == true)
+        #expect(model.lastErrorMessage == nil)
+        #expect(try readDisk().tasks.first?.isPinned == true)
+
+        controller.togglePinnedCard(task.id) // the next click shows it again
+        #expect(card.isVisible)
+        #expect(controller.pinnedPanelForTesting(task.id) === card)
+        controller.stop()
+    }
+
+    // MARK: - Unpin from the main surface
+
+    @Test func unpinRemovesTickerAndOpenCardAndPersists() throws {
+        let task = pinnedActive()
+        try seedDisk(with: TaskStore(tasks: [task]))
+        let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
+        controller.installStoreObservation()
+        controller.togglePinnedCard(task.id)
+        let card = try #require(controller.pinnedPanelForTesting(task.id))
 
         model.setPinned(task, false) // the normal pin affordance path
 
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
         #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(card.isVisible == false && card.contentViewController == nil)
         #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
         controller.stop()
     }
 
-    // MARK: - Archival catch-up closes panels
+    // MARK: - Archival catch-up retires tickers
 
-    @Test func catchUpSweepClosesArchivedPinnedPanel() throws {
+    @Test func catchUpSweepRetiresArchivedTicker() throws {
         let task = TaskItem(
             title: "swept",
             status: .done,
@@ -326,13 +387,13 @@ final class Phase3PanelLifecycleTests {
         try seedDisk(with: TaskStore(tasks: [task]))
         let (controller, _) = try makeController(with: TaskStore(tasks: [task]))
         controller.installStoreObservation()
-        #expect(controller.pinnedPanelCountForTesting == 1)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
 
         clock.advance(3601) // one second past the inclusive archival deadline
         let archived = controller.runCatchUpSweep() // timer/wake/session seam
 
         #expect(archived == [task.id])
-        #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
         let disk = try readDisk()
         let swept = try #require(disk.tasks.first(where: { $0.id == task.id }))
         #expect(swept.isArchived)
@@ -347,7 +408,7 @@ final class Phase3PanelLifecycleTests {
         try seedDisk(with: TaskStore(tasks: [task]))
         let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
         controller.installStoreObservation()
-        #expect(controller.pinnedPanelCountForTesting == 1)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
 
         // External edit while running: pin removed on disk.
         var external = TaskStore(tasks: [task])
@@ -355,146 +416,109 @@ final class Phase3PanelLifecycleTests {
         try fileStore.save(external)
         model.reload()
 
-        #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
         controller.stop()
     }
 
-    // MARK: - User closing a pinned panel unpins durably (model-first)
+    @Test func tickerAndOpenCardFollowTitleChanges() throws {
+        let task = pinnedActive(title: "short")
+        try seedDisk(with: TaskStore(tasks: [task]))
+        let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
+        controller.installStoreObservation()
+        controller.togglePinnedCard(task.id)
+        let ticker = try #require(controller.pinnedTickerForTesting(task.id))
 
-    @Test func userClosingPinnedPanelUnpinsDurablyThenRemovesPanel() throws {
+        // External rename while running (the app itself has no rename).
+        let renamed = TaskItem(
+            id: task.id,
+            title: "A much longer title that has to scroll through the ticker",
+            status: task.status,
+            createdAt: t0,
+            updatedAt: t0.addingTimeInterval(10),
+            isPinned: true
+        )
+        try fileStore.save(TaskStore(tasks: [renamed]))
+        model.reload()
+
+        #expect(controller.pinnedTickerTextForTesting(task.id) == renamed.title)
+        #expect(controller.pinnedTickerForTesting(task.id) === ticker, "a rename updates the ticker in place")
+        #expect(ticker.button?.toolTip == renamed.title)
+        #expect(controller.pinnedPanelForTesting(task.id)?.title == renamed.title)
+        controller.stop()
+    }
+
+    // MARK: - Locked storage keeps the ticker; recovery reuses it
+
+    @Test func lockedStorageKeepsTheTickerAndItsCardMutationFree() throws {
         let task = pinnedActive()
         try seedDisk(with: TaskStore(tasks: [task]))
         let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
         controller.installStoreObservation()
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
-
-        // performClose simulates the close button: it consults
-        // windowShouldClose, which requests the durable unpin first. The
-        // successful publication then lets observed state strip and
-        // programmatically close the panel with its delegate detached.
-        panel.performClose(nil)
-
-        #expect(controller.pinnedPanelCountForTesting == 0)
-        #expect(panel.isVisible == false)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
-        #expect(model.lastErrorMessage == nil)
-        #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
-        controller.stop()
-    }
-
-    // MARK: - Save failure keeps the panel and pin coherent
-
-    @Test func saveFailedCloseKeepsPanelVisibleAndPinUntilRetrySucceeds() throws {
-        let task = pinnedActive()
-        try seedDisk(with: TaskStore(tasks: [task]))
-        let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
-        controller.installStoreObservation()
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
-
-        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: dir.path)
-        panel.performClose(nil) // durable unpin fails: save refused
-
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        #expect(panel.isVisible == true)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
-        #expect(model.lastErrorMessage?.hasPrefix("Could not save tasks") == true)
-        #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
-
-        // Retry once durability is possible again: one clean removal.
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: dir.path)
-        clock.advance(10) // late disk timestamps stay inside the archive window
-        panel.performClose(nil)
-        #expect(controller.pinnedPanelCountForTesting == 0)
-        #expect(panel.isVisible == false)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
-        #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
-        controller.stop()
-    }
-
-    // MARK: - Locked storage keeps close coherent; recovery unlocks it
-
-    @Test func lockedCloseKeepsPanelCoherentAndRecoveryRetryRemovesIt() throws {
-        let task = pinnedActive()
-        try seedDisk(with: TaskStore(tasks: [task]))
-        let (controller, model) = try makeController(with: TaskStore(tasks: [task]))
-        controller.installStoreObservation()
-        #expect(controller.pinnedPanelCountForTesting == 1)
+        let ticker = try #require(controller.pinnedTickerForTesting(task.id))
 
         // External corruption while running: reload fails and locks storage.
         try Data("this is not a document".utf8).write(to: fileStore.fileURL)
         model.reload()
         #expect(model.canMutate == false)
-        #expect(controller.pinnedPanelCountForTesting == 1) // stale desired panel remains
+        #expect(controller.pinnedTickerIDsForTesting == [task.id]) // the displayed snapshot keeps its ticker
 
-        // Locked close is refused: panel and pin stay coherent.
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
-        panel.performClose(nil)
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        #expect(panel.isVisible == true)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
+        // The card still opens (it shows the locked state with Reload), and
+        // closing it only hides it.
+        controller.togglePinnedCard(task.id)
+        let card = try #require(controller.pinnedPanelForTesting(task.id))
+        #expect(card.isVisible)
+        card.performClose(nil)
+        #expect(card.isVisible == false)
+        #expect(model.store.tasks.first?.isPinned == true)
 
-        // Repair into a valid pinned document, reload (combines store + lock
-        // state), then the retry close unpins durably with one removal.
+        // Repair and reload: unlocked, and the same ticker carries on.
         try seedDisk(with: TaskStore(tasks: [task]))
         model.reload()
         #expect(model.canMutate == true)
-        #expect(controller.pinnedPanelCountForTesting == 1) // recovery restored the pinned panel once
-
-        panel.performClose(nil)
-        #expect(controller.pinnedPanelCountForTesting == 0)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
-        #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == false)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        #expect(controller.pinnedTickerForTesting(task.id) === ticker)
         controller.stop()
     }
 
-    /// Oracle's exact missing-panel recovery case: the controller starts with
-    /// locked/unreadable storage and ZERO pinned panels, the combined
-    /// store/lock observation is installed, storage is repaired externally
-    /// with a valid persisted pinned task, and `reload()` must make exactly
-    /// one panel appear immediately after unlock without any extra store
-    /// mutation. Repeated reconcile and a further reload never duplicate or
-    /// rebuild the panel.
-    @Test func lockedStartWithZeroPanelsRestoresExactlyOnePanelOnExternalRepairAndReload() throws {
+    /// The controller starts with locked/unreadable storage and ZERO tickers,
+    /// storage is repaired externally with a valid persisted pinned task, and
+    /// `reload()` must make exactly one ticker appear immediately, without
+    /// any store mutation. Repeated reconcile and a further reload never
+    /// duplicate or rebuild it.
+    @Test func lockedStartWithZeroTickersRestoresExactlyOneOnExternalRepairAndReload() throws {
         try seedDisk(with: TaskStore()) // ensures the storage directory exists
         try Data("this is not a document".utf8).write(to: fileStore.fileURL)
 
-        // The model locks at initialization: in-memory store is empty and the
-        // observation must not create panels while locked.
+        // The model locks at initialization with an empty in-memory store.
         let (controller, model) = try makeController(with: TaskStore())
         #expect(model.canMutate == false)
         controller.installStoreObservation()
-        #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
 
         // External repair into a valid persisted pinned task; unlock is the
-        // only recovery path and must converge to exactly one panel.
+        // only recovery path and must converge to exactly one ticker.
         let task = pinnedActive()
         try seedDisk(with: TaskStore(tasks: [task]))
         model.reload()
 
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
+        let ticker = try #require(controller.pinnedTickerForTesting(task.id))
         #expect(model.canMutate == true)
         #expect(model.lastErrorMessage == nil)
-        #expect(controller.pinnedPanelCountForTesting == 1) // exactly one, immediately
-        #expect(panel.isVisible == true)
-        #expect(model.store.activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
-
-        // No extra store mutation during recovery: disk still pins the task.
+        #expect(controller.pinnedTickerIDsForTesting == [task.id]) // exactly one, immediately
+        #expect(controller.pinnedPanelCountForTesting == 0)
+        // No store mutation during recovery: disk still pins the task.
         #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
 
         // Idempotent convergence: repeated reconcile and a second reload do
-        // not duplicate or rebuild the panel.
-        controller.reconcilePinnedPanels(with: model.store, canMutate: true)
-        controller.reconcilePinnedPanels(with: model.store, canMutate: true)
+        // not duplicate or rebuild the ticker.
+        controller.reconcilePinnedTasks(with: model.store)
+        controller.reconcilePinnedTasks(with: model.store)
         model.reload()
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        #expect(controller.pinnedPanelForTesting(task.id) === panel)
-        #expect(try readDisk().activeTasks.first(where: { $0.id == task.id })?.isPinned == true)
+        #expect(controller.pinnedTickerIDsForTesting == [task.id])
+        #expect(controller.pinnedTickerForTesting(task.id) === ticker)
 
-        // Teardown cleans the recovered panel; the suite deinit removes the
-        // temporary bytes and permissions.
         controller.stop()
-        #expect(controller.pinnedPanelCountForTesting == 0)
-        #expect(panel.isVisible == false)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
     }
 
     // MARK: - Catch-up observer seam: delivery, running gate, and teardown
@@ -543,33 +567,6 @@ final class Phase3PanelLifecycleTests {
         center.post(name: name, object: nil)
         #expect(controller.catchUpObserverHitsForTesting == 3)
         #expect(controller.catchUpInvocationsForTesting == 2)
-    }
-
-    // MARK: - Pinned content constraints survive frame restoration
-
-    @Test func undersizedRestoredFrameIsClampedToAcceptedContentConstraints() throws {
-        let task = pinnedActive()
-        try seedDisk(with: TaskStore(tasks: [task]))
-        let autosave = StatusItemPanelsController.pinnedFrameAutosavePrefix + task.id.uuidString
-        let defaultsKey = "NSWindow Frame " + autosave
-        let defaults = UserDefaults.standard
-        defaults.set("8 8 120 90", forKey: defaultsKey) // far below the accepted minimum
-
-        let (controller, _) = try makeController(with: TaskStore(tasks: [task]))
-        controller.installStoreObservation()
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
-
-        let content = panel.contentRect(forFrameRect: panel.frame).size
-        #expect(content.width >= StatusItemPanelsController.pinnedPanelMinimumSize.width)
-        #expect(content.height >= StatusItemPanelsController.pinnedPanelMinimumSize.height)
-        #expect(content.width <= StatusItemPanelsController.pinnedPanelMaxWidth)
-        #expect(panel.contentMinSize == NSSize(width: StatusItemPanelsController.pinnedPanelMinimumSize.width, height: StatusItemPanelsController.pinnedPanelMinimumSize.height))
-        #expect(panel.contentMaxSize.width == StatusItemPanelsController.pinnedPanelMaxWidth)
-
-        // Cleanup so test runs never leak frames into the host defaults.
-        panel.setFrameAutosaveName("")
-        defaults.removeObject(forKey: defaultsKey)
-        controller.stop()
     }
 
     // MARK: - Retained main surface identity across toggles
@@ -674,15 +671,17 @@ final class Phase3PanelLifecycleTests {
         #expect(!controller.keyMonitorInstalledForTesting)
         controller.start() // installs monitor, timer, observers, store observation
         #expect(controller.keyMonitorInstalledForTesting)
-        #expect(controller.pinnedPanelCountForTesting == 1) // persisted pins restored
-        let panel = try #require(controller.pinnedPanelForTesting(task.id))
+        #expect(controller.pinnedTickerIDsForTesting == [task.id]) // persisted pins restored
+        controller.togglePinnedCard(task.id)
+        let card = try #require(controller.pinnedPanelForTesting(task.id))
 
         controller.stop()
         #expect(!controller.keyMonitorInstalledForTesting)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
         #expect(controller.pinnedPanelCountForTesting == 0)
         #expect(controller.mainPanelForTesting == nil) // terminal teardown releases the main surface
-        #expect(panel.isVisible == false && panel.contentViewController == nil,
-                "stopped pinned panel must be closed and stripped, not left as a hidden resource")
+        #expect(card.isVisible == false && card.contentViewController == nil,
+                "a stopped card must be closed and stripped, not left as a hidden resource")
 
         controller.stop() // teardown is idempotent; no crash, no monitors left
         #expect(!controller.keyMonitorInstalledForTesting)
@@ -690,20 +689,20 @@ final class Phase3PanelLifecycleTests {
 
     // MARK: - Deterministic AppKit resource teardown
 
-    /// Reconciliation paths must deterministically strip a retired panel's
-    /// every meaningful edge: the panel is closed (not merely hidden), its
+    /// Reconciliation paths must deterministically strip a retired card's
+    /// every meaningful edge: the card is closed (not merely hidden), its
     /// hosted SwiftUI content is detached, and controller-side references
     /// are dropped, so NSHostingView/PinnedTaskCardView/AppModel can no
     /// longer be reached through hidden windows at process exit (the helper
     /// exit-time race that destabilized the runner). Unpin (observed store
     /// change), archival (catch-up sweep), and terminal `stop()` are each
-    /// proven to strip the specific panel they retire. Note: evacuating the
-    /// `NSApp.windows` entry entirely would need `isReleasedWhenClosed =
-    /// true` at close, which over-releases under ARC on this toolchain
-    /// (SIGSEGV inside _NSWindowTransformAnimation at a CA transaction
-    /// commit — see debug evidence); registered-but-empty shells are the
-    /// safe terminal state.
-    @Test func pinnedPanelDestructionLeavesNSAppWindowsAfterUnpinArchiveAndStop() throws {
+    /// proven to strip the specific card they retire, along with its ticker.
+    /// Note: evacuating the `NSApp.windows` entry entirely would need
+    /// `isReleasedWhenClosed = true` at close, which over-releases under ARC
+    /// on this toolchain (SIGSEGV inside _NSWindowTransformAnimation at a CA
+    /// transaction commit — see debug evidence); registered-but-empty shells
+    /// are the safe terminal state.
+    @Test func pinnedCardDestructionStripsPanelsAfterUnpinArchiveAndStop() throws {
         let unpinTask = pinnedActive()
         let archivedTask = TaskItem(
             title: "sweep-teardown",
@@ -718,23 +717,32 @@ final class Phase3PanelLifecycleTests {
         let (controller, model) = try makeController(with: TaskStore(tasks: [unpinTask, archivedTask, survivorTask]))
 
         controller.start()
-        #expect(controller.pinnedPanelCountForTesting == 3) // all persisted pins restored
+        #expect(controller.pinnedTickerIDsForTesting == [unpinTask.id, archivedTask.id, survivorTask.id])
+        for task in [unpinTask, archivedTask, survivorTask] {
+            controller.togglePinnedCard(task.id)
+        }
+        #expect(controller.pinnedPanelCountForTesting == 3)
         let unpinPanel = controller.pinnedPanelForTesting(unpinTask.id)
         let archivedPanel = controller.pinnedPanelForTesting(archivedTask.id)
         let survivorPanel = controller.pinnedPanelForTesting(survivorTask.id)
         #expect(unpinPanel?.isVisible == true && archivedPanel?.isVisible == true && survivorPanel?.isVisible == true)
 
         // (a) Unpin through the observed store: reconciliation strips the
-        // panel — closed, content detached, dropped from the controller.
+        // card — closed, content detached, dropped from the controller.
         model.setPinned(unpinTask, false)
         #expect(controller.pinnedPanelCountForTesting == 2)
-        #expect(unpinPanel?.isVisible == false, "unpinned panel must be closed, not merely hidden")
-        #expect(unpinPanel?.contentViewController == nil, "unpinned panel must be stripped of hosted content")
+        #expect(controller.pinnedTickerIDsForTesting == [archivedTask.id, survivorTask.id])
+        #expect(unpinPanel?.isVisible == false, "an unpinned card must be closed, not merely hidden")
+        #expect(unpinPanel?.contentViewController == nil, "an unpinned card must be stripped of hosted content")
 
-        // (b) Archival catch-up sweep: the archived pin is destroyed too.
+        // (b) Archival catch-up sweep: the archived pin's card is destroyed
+        // too, even while hidden.
+        controller.togglePinnedCard(archivedTask.id)
+        #expect(archivedPanel?.isVisible == false)
         clock.advance(3601) // one second past the inclusive archival deadline
         #expect(controller.runCatchUpSweep() == [archivedTask.id])
         #expect(controller.pinnedPanelCountForTesting == 1)
+        #expect(controller.pinnedTickerIDsForTesting == [survivorTask.id])
         #expect(archivedPanel?.isVisible == false)
         #expect(archivedPanel?.contentViewController == nil)
         #expect(survivorPanel?.isVisible == true, "survivor stays live until its own retirement")
@@ -746,9 +754,10 @@ final class Phase3PanelLifecycleTests {
         let sweptDisk = try #require(disk.tasks.first(where: { $0.id == archivedTask.id }))
         #expect(sweptDisk.isArchived && !sweptDisk.isPinned)
 
-        // (c) Terminal stop(): the surviving panel is stripped as well.
+        // (c) Terminal stop(): the surviving card and ticker go as well.
         controller.stop()
         #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(controller.pinnedTickerIDsForTesting.isEmpty)
         #expect(controller.mainPanelForTesting == nil)
         #expect(survivorPanel?.isVisible == false)
         #expect(survivorPanel?.contentViewController == nil)
@@ -777,17 +786,19 @@ final class Phase3PanelLifecycleTests {
         controller.start()
         #expect(controller.catchUpObserverTokenCountForTesting == 3) // activation + wake + session
         #expect(controller.keyMonitorInstalledForTesting)
-        #expect(controller.pinnedPanelCountForTesting == 1) // launch restore from the first start
-        let firstSessionPanelID = try #require(controller.pinnedPanelIDsForTesting.first)
-        let firstSessionPanel = try #require(controller.pinnedPanelForTesting(firstSessionPanelID))
-        let firstSessionIdentity = ObjectIdentifier(firstSessionPanel)
+        #expect(controller.pinnedTickerIDsForTesting.count == 1) // launch restore from the first start
+        let pinnedID = try #require(controller.pinnedTickerIDsForTesting.first)
+        let firstSessionTicker = try #require(controller.pinnedTickerForTesting(pinnedID))
+        controller.togglePinnedCard(pinnedID)
+        let firstSessionCard = try #require(controller.pinnedPanelForTesting(pinnedID))
 
         // Second start while running: guarded no-op — no appended tokens,
-        // no duplicate monitor/timer/subscription.
+        // no duplicate monitor/timer/subscription/ticker.
         controller.start()
         #expect(controller.catchUpObserverTokenCountForTesting == 3)
         #expect(controller.keyMonitorInstalledForTesting)
-        #expect(controller.pinnedPanelCountForTesting == 1)
+        #expect(controller.pinnedTickerIDsForTesting == [pinnedID])
+        #expect(controller.pinnedTickerForTesting(pinnedID) === firstSessionTicker)
 
         // Delivery nonduplication on the same observer path during a live
         // running session: one post, exactly one catch-up delivery.
@@ -802,12 +813,12 @@ final class Phase3PanelLifecycleTests {
         #expect(controller.catchUpInvocationsForTesting == 2) // one token: one delivery per post
 
         // stop() tears every seam down: local token too. Terminal teardown
-        // also strips the session-1 window (closed + hosted content
-        // detached), so a restart cannot pile up live rooted resources.
+        // also strips the session-1 card (closed + hosted content detached),
+        // so a restart cannot pile up live rooted resources.
         controller.stop()
         #expect(controller.catchUpObserverTokenCountForTesting == 0)
         #expect(!controller.keyMonitorInstalledForTesting)
-        #expect(firstSessionPanel.isVisible == false && firstSessionPanel.contentViewController == nil)
+        #expect(firstSessionCard.isVisible == false && firstSessionCard.contentViewController == nil)
         center.post(name: name, object: nil)
         #expect(controller.catchUpObserverHitsForTesting == 2)
         #expect(controller.catchUpInvocationsForTesting == 2)
@@ -818,14 +829,14 @@ final class Phase3PanelLifecycleTests {
         #expect(controller.keyMonitorInstalledForTesting)
 
         // And the idempotence guard still holds on the fresh session, backed
-        // by a fresh lifecycle: same task id restored, but a brand-new window.
+        // by a fresh lifecycle: same task id restored, but a brand-new
+        // ticker, and no card until it is clicked again.
         controller.start()
         #expect(controller.catchUpObserverTokenCountForTesting == 3)
-        #expect(controller.pinnedPanelCountForTesting == 1)
-        let secondSessionPanelID = try #require(controller.pinnedPanelIDsForTesting.first)
-        #expect(secondSessionPanelID == firstSessionPanelID)
-        #expect(ObjectIdentifier(try #require(controller.pinnedPanelForTesting(secondSessionPanelID))) != firstSessionIdentity)
-        #expect(firstSessionPanel.contentViewController == nil, "session-1 root stays detached after restart")
+        #expect(controller.pinnedTickerIDsForTesting == [pinnedID])
+        #expect(controller.pinnedTickerForTesting(pinnedID) !== firstSessionTicker)
+        #expect(controller.pinnedPanelCountForTesting == 0)
+        #expect(firstSessionCard.contentViewController == nil, "session-1 root stays detached after restart")
 
         controller.stop()
     }

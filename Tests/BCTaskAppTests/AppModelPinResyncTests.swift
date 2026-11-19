@@ -4,9 +4,9 @@ import BCTaskCore
 @testable import BCTask
 
 /// App-level seam evidence for the "pin mirrors Doing" domain rule: moving a
-/// task to Doing through the model enters the desired pinned-panel set, and
-/// moving it out leaves it — so the existing pinned-panel reconciliation
-/// opens/closes the floating panel automatically.
+/// task to Doing through the model enters the desired pinned-ticker set, and
+/// moving it out leaves it — so the pinned-ticker reconciliation shows and
+/// removes the task's menu-bar ticker automatically.
 @MainActor
 final class AppModelPinResyncTests {
     private let t0: Date
@@ -38,22 +38,22 @@ final class AppModelPinResyncTests {
         try fileStore.load(now: clock.read())
     }
 
-    @Test func moveToDoingEntersAndLeavesTheDesiredPinnedPanelSet() throws {
+    @Test func moveToDoingEntersAndLeavesTheDesiredPinnedTickerSet() throws {
         let task = TaskItem.make(title: "task", now: t0)
         try fileStore.save(TaskStore(tasks: [task]))
         let model = modelWithStorage()
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: model.store).isEmpty)
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: model.store).isEmpty)
 
         clock.advance(to: t0.addingTimeInterval(10))
         model.setStatus(task, to: .doing)
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: model.store) == [task.id],
-                "the Doing move pins, so reconciliation opens the floating panel")
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: model.store) == [task.id],
+                "the Doing move pins, so reconciliation shows the menu-bar ticker")
         #expect(try persistedStore().tasks.first?.isPinned == true, "the auto-pin is durable")
 
         clock.advance(to: t0.addingTimeInterval(20))
         model.setStatus(try #require(model.activeTasks.first), to: .done)
-        #expect(StatusItemPanelsController.desiredPinnedPanelIDs(in: model.store).isEmpty,
-                "the Done move unpins, so reconciliation closes the floating panel")
+        #expect(StatusItemPanelsController.desiredPinnedTaskIDs(in: model.store).isEmpty,
+                "the Done move unpins, so reconciliation removes the menu-bar ticker")
         #expect(try persistedStore().tasks.first?.isPinned == false)
         #expect(model.lastErrorMessage == nil)
     }
